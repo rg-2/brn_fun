@@ -13,7 +13,7 @@ from pathlib import Path
 import click
 
 from .config import Granularity, load_config, load_secrets
-from .db import connect, count_candles, latest_time, upsert_candles
+from .db import connect, count_candles, fetch_candles, latest_time, upsert_candles
 from .oanda import download_range, download_recent
 
 
@@ -160,6 +160,69 @@ def status(ctx: click.Context) -> None:
             n = count_candles(conn, inst, gran)
             last = latest_time(conn, inst, gran) or "-"
             click.echo(f"{inst:<10}  {n:>8}  {last}")
+
+
+@cli.command()
+@click.argument("instrument")
+@click.option(
+    "--granularity", "-g", type=str, default=None,
+    help="Candle granularity (default: from config).",
+)
+@click.option(
+    "--tail", "tail", type=int, default=20, show_default=True,
+    help="Show the last N bars (chronological, newest at bottom).",
+)
+@click.option(
+    "--head", "head", type=int, default=None,
+    help="Show the first N stored bars instead (overrides --tail).",
+)
+@click.option(
+    "--complete-only/--all", default=False,
+    help="Drop the currently-forming bar (complete=0).",
+)
+@click.pass_context
+def show(
+    ctx: click.Context,
+    instrument: str,
+    granularity: str | None,
+    tail: int,
+    head: int | None,
+    complete_only: bool,
+) -> None:
+    """Print stored bars for INSTRUMENT as a table."""
+    cfg = ctx.obj["config"]
+    gran = granularity or cfg.default_granularity
+
+    with connect(cfg.db_path) as conn:
+        if head is not None:
+            bars = fetch_candles(
+                conn, instrument, gran,
+                limit=head, order="asc", complete_only=complete_only,
+            )
+        else:
+            # Grab last N in desc order, then flip so output reads oldest→newest.
+            bars = fetch_candles(
+                conn, instrument, gran,
+                limit=tail, order="desc", complete_only=complete_only,
+            )
+            bars.reverse()
+
+    if not bars:
+        click.echo(f"No {gran} bars stored for {instrument}.")
+        return
+
+    # Header
+    click.echo(
+        f"{'time':<30}  {'open':>9}  {'high':>9}  {'low':>9}  "
+        f"{'close':>9}  {'volume':>7}  c"
+    )
+    for b in bars:
+        flag = "1" if b.complete else "·"  # · = forming bar, easy to spot
+        click.echo(
+            f"{b.time:<30}  {b.open:>9.5f}  {b.high:>9.5f}  {b.low:>9.5f}  "
+            f"{b.close:>9.5f}  {b.volume:>7d}  {flag}"
+        )
+    click.echo(f"({len(bars)} bars)")
 
 
 def _iso_to_dt(s: str) -> datetime:

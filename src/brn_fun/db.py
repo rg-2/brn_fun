@@ -114,3 +114,50 @@ def count_candles(
         (instrument, granularity),
     )
     return int(cur.fetchone()[0])
+
+
+def fetch_candles(
+    conn: sqlite3.Connection,
+    instrument: str,
+    granularity: str,
+    *,
+    limit: int | None = None,
+    order: str = "asc",
+    complete_only: bool = False,
+) -> list[Candle]:
+    """Read stored candles for (instrument, granularity).
+
+    ``order`` is ``"asc"`` (oldest → newest) or ``"desc"`` (newest → oldest).
+    ``limit`` caps the row count; combine with ``order="desc"`` to get "last N".
+    ``complete_only=True`` drops the currently-forming bar.
+    """
+    if order not in ("asc", "desc"):
+        raise ValueError(f"order must be 'asc' or 'desc', got {order!r}")
+
+    sql = [
+        "SELECT instrument, granularity, time, open, high, low, close, "
+        "volume, complete FROM candles WHERE instrument=? AND granularity=?"
+    ]
+    params: list[object] = [instrument, granularity]
+    if complete_only:
+        sql.append("AND complete = 1")
+    sql.append(f"ORDER BY time {order.upper()}")
+    if limit is not None:
+        sql.append("LIMIT ?")
+        params.append(limit)
+
+    cur = conn.execute(" ".join(sql), params)
+    return [
+        Candle(
+            instrument=row[0],
+            granularity=row[1],
+            time=row[2],
+            open=row[3],
+            high=row[4],
+            low=row[5],
+            close=row[6],
+            volume=row[7],
+            complete=bool(row[8]),
+        )
+        for row in cur
+    ]
