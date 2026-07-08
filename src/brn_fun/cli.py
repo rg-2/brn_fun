@@ -25,6 +25,14 @@ from .reaction import (
     target_stats,
 )
 
+# Rough time-per-bar for granularity codes we might see. Used only for
+# human-readable hour labels in the reaction table.
+_MINUTES_PER_BAR = {
+    "S5": 5 / 60, "S10": 10 / 60, "S15": 15 / 60, "S30": 30 / 60,
+    "M1": 1, "M2": 2, "M4": 4, "M5": 5, "M10": 10, "M15": 15, "M30": 30,
+    "H1": 60, "H2": 120, "H3": 180, "H4": 240,
+}
+
 
 @click.group()
 @click.option(
@@ -243,10 +251,11 @@ def show(
               help="Round-level grid: handle=0.10, half=0.05, figure=0.01.")
 @click.option("--grid", type=float, default=None,
               help="Numeric grid override (e.g. 0.005). Wins over --tier.")
-@click.option("--cooldown-bars", type=int, default=480, show_default=True,
-              help="Bars a level must be untouched before it counts as fresh.")
-@click.option("--forward-bars", type=int, default=96, show_default=True,
-              help="Bars to look forward when tagging outcome.")
+@click.option("--cooldown-bars", type=int, default=7200, show_default=True,
+              help="Bars a level must be untouched before it counts as fresh "
+                   "(7200 M1 = 5 trading days).")
+@click.option("--forward-bars", type=int, default=1440, show_default=True,
+              help="Bars to look forward when tagging outcome (1440 M1 = 24h).")
 @click.option("--bounce-pips", type=float, default=30.0, show_default=True,
               help="Favorable move (pips) required to tag 'bounce'.")
 @click.option("--break-pips", type=float, default=30.0, show_default=True,
@@ -265,14 +274,14 @@ def show(
               help="Write per-touch rows to CSV.")
 @click.option("--head", type=int, default=15, show_default=True,
               help="How many recent touches to print in the table.")
-@click.option("--atr-period", type=int, default=14, show_default=True,
-              help="Bars used for ATR at time of touch.")
-@click.option("--approach-bars", type=int, default=20, show_default=True,
-              help="Bars used for approach-change / approach-range features.")
-@click.option("--sma-period", type=int, default=1920, show_default=True,
-              help="Bars for the trend SMA (default 1920 M15 = 20 days).")
-@click.option("--slope-lookback", type=int, default=480, show_default=True,
-              help="Bars back for SMA slope (default 480 M15 = 5 days).")
+@click.option("--atr-period", type=int, default=210, show_default=True,
+              help="Bars used for ATR (210 M1 = 3.5h, matches classic 14-M15).")
+@click.option("--approach-bars", type=int, default=300, show_default=True,
+              help="Bars for approach-change/approach-range (300 M1 = 5h).")
+@click.option("--sma-period", type=int, default=28800, show_default=True,
+              help="Bars for the trend SMA (28800 M1 = 20 trading days).")
+@click.option("--slope-lookback", type=int, default=7200, show_default=True,
+              help="Bars back for SMA slope (7200 M1 = 5 trading days).")
 @click.option("--trend-flat-pips", type=float, default=50.0, show_default=True,
               help="|SMA slope| below this many pips is 'flat', else up/down.")
 @click.pass_context
@@ -454,9 +463,10 @@ def _export_touches(
               help="Numeric grid override; wins over --tier.")
 @click.option("--pip", type=float, default=0.0001, show_default=True,
               help="Pip size (0.0001 majors, 0.01 JPY pairs).")
-@click.option("--cooldown-bars", type=int, default=480, show_default=True)
-@click.option("--forward-bars", type=int, default=96, show_default=True,
-              help="Analyze-window bars (used to tag outcomes for reference).")
+@click.option("--cooldown-bars", type=int, default=7200, show_default=True,
+              help="Bars a level must be untouched (7200 M1 = 5 trading days).")
+@click.option("--forward-bars", type=int, default=1440, show_default=True,
+              help="Analyze-window bars (1440 M1 = 24h).")
 @click.option("--filter", "filter_name",
               type=click.Choice(list(FILTERS.keys())),
               default="wick+drift+away", show_default=True,
@@ -472,8 +482,9 @@ def _export_touches(
 @click.option("--stop-atr", type=float, default=None,
               help="If set, stop = this multiplier × per-touch ATR "
                    "(overrides --stop-pips).")
-@click.option("--max-bars", type=int, default=96, show_default=True,
-              help="Timeout: bars to hold before closing at market.")
+@click.option("--max-bars", type=int, default=1440, show_default=True,
+              help="Timeout: bars to hold before closing at market "
+                   "(1440 M1 = 24h).")
 @click.option("--path-ambiguity", type=click.Choice(["worst", "best"]),
               default="worst", show_default=True,
               help="If a bar contains both target and stop, which fires first.")
@@ -617,8 +628,8 @@ def _export_trades(path: Path, trades: list, *, pip: float) -> None:
               show_default=True)
 @click.option("--grid", type=float, default=None)
 @click.option("--pip", type=float, default=0.0001, show_default=True)
-@click.option("--cooldown-bars", type=int, default=480, show_default=True)
-@click.option("--forward-bars", type=int, default=96, show_default=True)
+@click.option("--cooldown-bars", type=int, default=7200, show_default=True)
+@click.option("--forward-bars", type=int, default=1440, show_default=True)
 @click.option("--filter", "filter_name",
               type=click.Choice(list(FILTERS.keys())),
               default="wick+drift+away", show_default=True)
@@ -627,7 +638,7 @@ def _export_trades(path: Path, trades: list, *, pip: float) -> None:
 @click.option("--stop-pips",   type=float, default=30.0, show_default=True)
 @click.option("--target-atr", type=float, default=None)
 @click.option("--stop-atr", type=float, default=None)
-@click.option("--max-bars", type=int, default=96, show_default=True)
+@click.option("--max-bars", type=int, default=1440, show_default=True)
 @click.option("--path-ambiguity", type=click.Choice(["worst", "best"]),
               default="worst", show_default=True)
 @click.option("--complete-only/--all", default=True, show_default=True)
@@ -641,8 +652,8 @@ def _export_trades(path: Path, trades: list, *, pip: float) -> None:
               help="Grid columns per PDF page.")
 @click.option("--rows", type=int, default=3, show_default=True,
               help="Grid rows per PDF page.")
-@click.option("--context-before", type=int, default=40, show_default=True,
-              help="Bars of pre-entry context shown per panel.")
+@click.option("--context-before", type=int, default=600, show_default=True,
+              help="Bars of pre-entry context shown per panel (600 M1 = 10h).")
 @click.option("--out", type=click.Path(dir_okay=False, path_type=Path), default=None,
               help="Output PDF path. Default: data/plots/<INSTRUMENT>.pdf")
 @click.pass_context
@@ -734,16 +745,17 @@ def plot(
               show_default=True)
 @click.option("--grid", type=float, default=None)
 @click.option("--pip", type=float, default=0.0001, show_default=True)
-@click.option("--cooldown-bars", type=int, default=480, show_default=True)
-@click.option("--forward-bars", type=int, default=32, show_default=True,
-              help="How many bars past entry to record reaction over (32 M15 = 8h).")
+@click.option("--cooldown-bars", type=int, default=7200, show_default=True)
+@click.option("--forward-bars", type=int, default=480, show_default=True,
+              help="Bars past entry to record reaction over (480 M1 = 8h).")
 @click.option("--filter", "filter_name",
               type=click.Choice(list(FILTERS.keys())),
               default="all", show_default=True,
               help="Only include events passing this filter. 'all' = raw base rates.")
 @click.option("--entry", type=click.Choice(["touch", "confirm"]), default=None)
-@click.option("--windows", default="2,4,8,16,32", show_default=True,
-              help="Comma-separated bar counts for time-bucket stats.")
+@click.option("--windows", default="30,60,120,240,480", show_default=True,
+              help="Comma-separated bar counts for time-bucket stats "
+                   "(default: 30min,1h,2h,4h,8h at M1).")
 @click.option("--targets", default="10,15,20,25,30", show_default=True,
               help="Comma-separated target sizes (pips) for hit-rate table.")
 @click.option("--split", type=str, default=None,
@@ -808,13 +820,13 @@ def reaction(
         click.echo("\n  Max FAVORABLE (pips) by time window:")
         click.echo(f"  {'bars':>4} {'hours':>6}   {'P25':>6} {'P50':>6} {'P75':>6} {'P90':>6}")
         for w in window_bars:
-            hrs = w * 15 / 60
+            hrs = w * _MINUTES_PER_BAR.get(gran, 1) / 60
             vals = [v / pip for v in fav_p[w]]
             click.echo(f"  {w:>4} {hrs:>5.1f}h    {vals[0]:>6.1f} {vals[1]:>6.1f} {vals[2]:>6.1f} {vals[3]:>6.1f}")
         click.echo("\n  Max ADVERSE (pips) by time window:")
         click.echo(f"  {'bars':>4} {'hours':>6}   {'P25':>6} {'P50':>6} {'P75':>6} {'P90':>6}")
         for w in window_bars:
-            hrs = w * 15 / 60
+            hrs = w * _MINUTES_PER_BAR.get(gran, 1) / 60
             vals = [v / pip for v in adv_p[w]]
             click.echo(f"  {w:>4} {hrs:>5.1f}h    {vals[0]:>6.1f} {vals[1]:>6.1f} {vals[2]:>6.1f} {vals[3]:>6.1f}")
 

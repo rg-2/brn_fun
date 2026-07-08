@@ -12,10 +12,12 @@ instruments:
   - EUR_JPY
   - GBP_JPY
 
-# Default candle granularity. M15 = 15-minute bars. Larger frames can be
-# resampled from these; if you want finer detail (M1, S5), download them on
-# demand for the windows you care about.
-default_granularity: M15
+# Default candle granularity. M1 = 1-minute bars. We use M1 as the primary
+# analytical granularity because it eliminates path-ambiguity in backtests
+# (a single-bar's price range rarely contains both target and stop).
+# M15 remains available; override with --granularity M15 and rescale
+# bar-count parameters by 1/15 (see CLI --help).
+default_granularity: M1
 
 # Local SQLite database path (relative to project root or absolute).
 db_path: data/brn_fun.sqlite
