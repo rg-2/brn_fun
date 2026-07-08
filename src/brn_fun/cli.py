@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from .analyze import TIERS, analyze, grid_for, summarize_outcomes
 from .config import Granularity, load_config, load_secrets
 from .db import connect, count_candles, fetch_candles, latest_time, upsert_candles
 from .oanda import download_range, download_recent
@@ -223,6 +224,133 @@ def show(
             f"{b.close:>9.5f}  {b.volume:>7d}  {flag}"
         )
     click.echo(f"({len(bars)} bars)")
+
+
+@cli.command()
+@click.argument("instrument")
+@click.option("--granularity", "-g", type=str, default=None,
+              help="Candle granularity (default: from config).")
+@click.option("--tier", type=click.Choice(list(TIERS.keys())), default="figure",
+              show_default=True,
+              help="Round-level grid: handle=0.10, half=0.05, figure=0.01.")
+@click.option("--grid", type=float, default=None,
+              help="Numeric grid override (e.g. 0.005). Wins over --tier.")
+@click.option("--cooldown-bars", type=int, default=480, show_default=True,
+              help="Bars a level must be untouched before it counts as fresh.")
+@click.option("--forward-bars", type=int, default=96, show_default=True,
+              help="Bars to look forward when tagging outcome.")
+@click.option("--bounce-pips", type=float, default=30.0, show_default=True,
+              help="Favorable move (pips) required to tag 'bounce'.")
+@click.option("--break-pips", type=float, default=30.0, show_default=True,
+              help="Adverse move (pips) required to tag 'break'.")
+@click.option("--pip", type=float, default=0.0001, show_default=True,
+              help="Pip size (0.0001 for majors, 0.01 for JPY pairs).")
+@click.option("--complete-only/--all", default=True, show_default=True,
+              help="Skip the currently-forming bar when reading history.")
+@click.option("--export", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="Write per-touch rows to CSV.")
+@click.option("--head", type=int, default=15, show_default=True,
+              help="How many recent touches to print in the table.")
+@click.pass_context
+def touches(
+    ctx: click.Context,
+    instrument: str,
+    granularity: str | None,
+    tier: str,
+    grid: float | None,
+    cooldown_bars: int,
+    forward_bars: int,
+    bounce_pips: float,
+    break_pips: float,
+    pip: float,
+    complete_only: bool,
+    export: Path | None,
+    head: int,
+) -> None:
+    """Find round-number 'first-touch-in-a-while' events and tag outcomes."""
+    cfg = ctx.obj["config"]
+    gran = granularity or cfg.default_granularity
+    grid_val = float(grid) if grid is not None else grid_for(tier)
+
+    with connect(cfg.db_path) as conn:
+        bars = fetch_candles(
+            conn, instrument, gran, limit=None, order="asc",
+            complete_only=complete_only,
+        )
+
+    if not bars:
+        click.echo(f"No {gran} bars stored for {instrument} — run `brn download` first.")
+        return
+
+    events = list(analyze(
+        bars,
+        grid=grid_val, cooldown_bars=cooldown_bars, forward_bars=forward_bars,
+        bounce_pips=bounce_pips, break_pips=break_pips, pip=pip,
+    ))
+
+    summary = summarize_outcomes(iter(events))
+    # `summarize_outcomes` consumed a fresh iterator; events list is intact.
+
+    span_from = bars[0].time
+    span_to = bars[-1].time
+    click.echo(
+        f"{instrument} {gran}   grid={grid_val:g}   cooldown={cooldown_bars} bars   "
+        f"forward={forward_bars} bars"
+    )
+    click.echo(f"span: {span_from} → {span_to}   ({len(bars):,} bars)")
+    click.echo(
+        f"touches: {summary['n']:>4}   "
+        f"bounce={summary['bounce']}   break={summary['break']}   "
+        f"both={summary['both']}   chop={summary['chop']}"
+    )
+    if summary["n"]:
+        click.echo(
+            f"avg favorable: {summary['favorable_avg'] / pip:5.1f} pips   "
+            f"avg adverse:   {summary['adverse_avg'] / pip:5.1f} pips"
+        )
+
+    if events:
+        click.echo("")
+        click.echo(
+            f"{'time':<30}  {'level':>7}  {'dir':<4}  "
+            f"{'fav':>6}  {'adv':>6}  {'outcome':<7}"
+        )
+        for t, o in events[-head:]:
+            click.echo(
+                f"{t.time:<30}  {t.level:>7.4f}  {t.direction:<4}  "
+                f"{o.favorable / pip:>6.1f}  {o.adverse / pip:>6.1f}  {o.tag:<7}"
+            )
+        click.echo(f"(showing last {min(head, len(events))} of {len(events)})")
+
+    if export is not None:
+        _export_touches(export, events, pip=pip)
+        click.echo(f"\nwrote {len(events)} rows to {export}")
+
+
+def _export_touches(
+    path: Path,
+    events: list,  # list[tuple[Touch, Outcome_]]
+    *,
+    pip: float,
+) -> None:
+    """Write per-touch results as CSV. Pip-denominated columns for readability."""
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow([
+            "time", "bar_idx", "level", "direction", "cooldown_bars",
+            "favorable_pips", "adverse_pips", "close_after", "close_dist_pips",
+            "window_bars", "outcome",
+        ])
+        for t, o in events:
+            w.writerow([
+                t.time, t.idx, f"{t.level:.5f}", t.direction, t.cooldown_bars,
+                f"{o.favorable / pip:.1f}", f"{o.adverse / pip:.1f}",
+                f"{o.close_after:.5f}", f"{o.close_dist / pip:.1f}",
+                o.window_bars, o.tag,
+            ])
 
 
 def _iso_to_dt(s: str) -> datetime:
