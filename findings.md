@@ -396,13 +396,88 @@ ambiguity. Modest but real.
 
 ### Open questions
 
-- **M1 data during trade windows** would resolve path ambiguity for the
-  4 pairs currently classified as "unknown". Cheap to fetch on-demand
-  (only need M1 bars during our few-hundred trades' forward windows).
+- ~~**M1 data during trade windows** would resolve path ambiguity for the
+  4 pairs currently classified as "unknown".~~ **Done — see M1 section below.**
 - The reaction study assumed entry at confirm-bar close. Does entering on
   the touch bar's close (no confirmation wait) change things? Might reveal
-  more setups on the "losing" pairs.
+  more setups on the "losing" pairs. → **Answered: entry timing is
+  *pair-specific* and hugely material at M1.**
 - Regime effect: AUD_USD H2 edge is 60% larger than H1. Real signal
   strengthening, or 2020+ tailwind we haven't identified?
 - No spread/slippage costs yet. AUD_USD +1.29 H1 becomes marginal after
   1.5p spread; USD_CAD +0.67 H1 is similar.
+
+## 2026-07-08 — Full M1 switch
+
+Backfilled 10 years of M1 candles for all 7 pairs (~26M rows, ~5.5 GB SQLite).
+Rescaled every bar-count CLI default by 15× so time semantics match M15:
+cooldown 480 → 7200 (5 trading days), forward 96 → 1440 (24h), etc. Set
+`default_granularity: M1` in config.
+
+### Path ambiguity essentially eliminated ✓
+
+Worst vs best backtest expectancy gap collapsed from **1.1-1.6 p/trade at M15
+to 0.00-0.36 p/trade at M1**. The biggest methodological uncertainty in our
+prior work is now resolved.
+
+| Config       | M15 gap | M1 gap |
+|--------------|--------:|-------:|
+| 60/30/24h    | ~0.0p  | 0.00p |
+| 15/20/2h     | +1.19p | +0.27p |
+| 30/15/2h     | +1.29p | +0.28p |
+
+### The entry-timing discovery
+
+Our M15 backtester's `entry=confirm` waited 1 M15 bar = **15 min**. At M1
+the same knob waits 1 min — barely any confirmation. Adding an
+``--entry-offset`` parameter (extra bars to wait after the base entry
+bar) revealed that **optimal wait is pair-specific**:
+
+Best pair-config-offset combos, aggregate under worst-case path, OOS-stable
+(both H1 and H2 positive):
+
+| Pair    | Config        | Offset   | H1 exp | H2 exp | 10y total |
+|---------|---------------|---------|-------:|-------:|----------:|
+| **AUD_USD** | 60/30/24h | 15 min | +3.85 | +6.23 | **+2,013 pips** |
+| **USD_CAD** | 15/20/4h  |  1 min | +2.06 | +1.07 |    +828 pips |
+| **EUR_JPY** | 30/15/2h  | 60 min | +1.37 | +0.76 |    +725 pips *(new)* |
+| **GBP_USD** | 30/15/2h  | 60 min | +1.36 | +0.64 |    +686 pips *(new setup)* |
+
+**Combined 4-pair portfolio: ~+4,250 pips over 10 years, ~200 trades/year.**
+Nearly 2× the earlier M15 portfolio (~+2,164 pips over 10y).
+
+### What we learned
+
+- **M15's fixed 15-min confirmation forced everyone into the same wait**;
+  M1 with tunable offset unlocks pair-specific setups.
+- **GBP_USD and EUR_JPY** need a full 60-min wait to filter M1 noise —
+  they were "unfit" before because 15 min wasn't enough.
+- **AUD_USD** likes 15-min waits — its M15 result was already near-optimal.
+- **USD_CAD** wants no wait at all — enter at the touch and go.
+- **EUR_USD, USD_JPY, GBP_JPY** still don't produce OOS-stable configs
+  even with tuning. Whatever the pattern is, it either doesn't exist for
+  them, or requires features we haven't captured.
+
+### Non-path-ambiguity findings
+
+- Analysis wall-clock: `brn touches` on M1 is ~45s per pair (vs 2s at M15).
+  Backtest ~45s per pair. Cross-pair sweeps ~10 min. Slower but tractable
+  for research.
+- Feature semantics shift with granularity — `wick_only`, `touch_shape`,
+  ATR, etc. compute on M1 bars now. Not directly comparable to their M15
+  meanings. This is a real semantic re-anchor.
+- Storage cost: ~200 bytes/row in SQLite → 5.5 GB. Bigger than the
+  80 bytes/row estimate I gave the user.
+
+### Open questions
+
+- Entry offset is now a knob per pair — need to formalize this into the
+  strategy config, or expose it in a per-pair table users can adjust.
+- Do these pair-specific offsets have any physical interpretation
+  (typical microstructure reaction time for that pair)? Or is it
+  data-fit at 4 pairs × 3 offsets?
+- Rolling-year check on the M1 portfolio would tighten confidence
+  (still a 5y-split test right now).
+- **Spread/slippage costs still not modelled.** AUD_USD +3.85 H1 easily
+  survives 1.5p spread. USD_CAD +2.06 H1 does too. But borderline pairs
+  (EUR_JPY +1.37, GBP_USD +1.36) get eroded.

@@ -165,6 +165,7 @@ def backtest_touches(
     pip: float = 0.0001,
     filter_name: str = "wick+drift+away",
     entry: Literal["touch", "confirm"] = "confirm",
+    entry_offset: int = 0,
     target_pips: float = 60.0,
     stop_pips: float = 30.0,
     target_atr: float | None = None,
@@ -189,10 +190,11 @@ def backtest_touches(
             continue
 
         # Decide the entry bar. "confirm" needs bar touch+1 to exist.
-        if entry == "touch":
-            entry_idx = touch.idx
-        else:
-            entry_idx = touch.idx + 1
+        # ``entry_offset`` adds additional bars of waiting after the base
+        # entry bar — useful on fine granularities where 1 bar is a very
+        # short confirmation (e.g. 1 min at M1 vs 15 min at M15).
+        base_offset = 0 if entry == "touch" else 1
+        entry_idx = touch.idx + base_offset + entry_offset
         if entry_idx >= len(bars):
             continue
 

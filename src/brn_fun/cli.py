@@ -474,6 +474,10 @@ def _export_touches(
 @click.option("--entry", type=click.Choice(["touch", "confirm"]), default=None,
               help="Bar to enter at. Defaults to 'confirm' when the filter "
                    "uses confirmation features (avoids peeking).")
+@click.option("--entry-offset", type=int, default=0, show_default=True,
+              help="Extra bars to wait after the base entry bar. Useful on M1 "
+                   "where 1 bar = 1 min; --entry-offset 14 mimics M15's "
+                   "15-min confirmation wait.")
 @click.option("--target-pips", type=float, default=60.0, show_default=True)
 @click.option("--stop-pips",   type=float, default=30.0, show_default=True)
 @click.option("--target-atr", type=float, default=None,
@@ -506,6 +510,7 @@ def backtest(
     forward_bars: int,
     filter_name: str,
     entry: str | None,
+    entry_offset: int,
     target_pips: float,
     stop_pips: float,
     target_atr: float | None,
@@ -544,6 +549,7 @@ def backtest(
         pip=pip,
         filter_name=filter_name,
         entry=entry,  # type: ignore[arg-type]
+        entry_offset=entry_offset,
         target_pips=target_pips, stop_pips=stop_pips,
         target_atr=target_atr, stop_atr=stop_atr,
         max_bars=max_bars,
@@ -555,7 +561,7 @@ def backtest(
     stp_desc = f"{stop_atr:g}×ATR"   if stop_atr   is not None else f"{stop_pips:g}p"
 
     click.echo(
-        f"{instrument} {gran}   filter={filter_name}   entry={entry}   "
+        f"{instrument} {gran}   filter={filter_name}   entry={entry}+{entry_offset}   "
         f"target={tgt_desc}   stop={stp_desc}   max_bars={max_bars}"
     )
     if bars:
