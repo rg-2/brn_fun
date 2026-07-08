@@ -317,3 +317,92 @@ the H1/H2 split.** Modest but honest.
 - Can we exploit the fact that AUD_USD prefers simpler filters — is there a
   meta-signal (volatility regime, pair category) that tells us which filter
   to use?
+
+## 2026-07-08 — Reaction study + quick-trade discovery
+
+Motivated by the observation from the H1/H2 plots that "almost every touch
+has *some* reaction, even when the level breaks eventually." Built a
+reaction analyzer that measures cumulative max fav/adv per bar after entry.
+
+### The level really does react
+
+Cross-pair summary at 2h window (8 M15 bars):
+
+| Pair    | Median fav | Median adv | Hit@10p | Hit@15p | AdvP75@10p |
+|---------|-----------:|-----------:|--------:|--------:|-----------:|
+| GBP_JPY |     23.8p |     23.2p |     77% |     66% |      19.1p |
+| USD_JPY |     16.6p |     16.8p |     64% |     54% |      15.6p |
+| EUR_JPY |     16.4p |     16.1p |     68% |     54% |      15.3p |
+| GBP_USD |     16.3p |     17.9p |     69% |     53% |      14.8p |
+| USD_CAD |     13.4p |     11.9p |     60% |     43% |      11.3p |
+| EUR_USD |     10.8p |     12.3p |     53% |     40% |       9.3p |
+| AUD_USD |      8.6p |      8.6p |     43% |     31% |       7.8p |
+
+Every pair sees ≥40% probability of the level holding for at least 10 pips
+within 2h, and adverse-before-hit stays tight (P75 usually just above the
+target size). This confirms the user's hypothesis.
+
+### But path ambiguity at M15 kills tight-threshold backtests
+
+Naïve interpretation: "40% hit rate at 10p → tight 10/15 target/stop must
+print money." Actual worst-case backtest at 10/15/8 aggregate: **−1.10p/trade
+in H1, −0.85p/trade in H2** — losing.
+
+Testing worst-case vs best-case path_ambiguity assumption:
+
+| Config    | worst H1 | worst H2 | best H1 | best H2 |
+|-----------|--------:|--------:|--------:|--------:|
+| 10/15/8   |  −1.10  |  −0.85  |  +0.31  |  +0.73  |
+| 15/20/8   |  −0.65  |  −0.62  |  +0.53  |  +0.56  |
+| 15/20/16  |  −0.61  |  −0.57  |  +0.61  |  +0.61  |
+| 20/25/16  |  −0.67  |  −0.45  |  +0.44  |  +0.42  |
+
+Gap is 1.1–1.6 pips per trade. **The true expectancy of a 10p-target
+strategy on M15 data cannot be determined without finer granularity.**
+Midpoint estimate is roughly breakeven. To honestly evaluate 10-15p
+target trades, we need M1 candles during the trade window.
+
+### But we found new OOS-stable pair-specific configs
+
+Even under worst-case path (pessimistic), some pair-config combos survive:
+
+**AUD_USD — 7/8 quick configs OOS-stable.** Best: **30/15/8** (2:1 R:R, 2h max)
+- H1: +1.29 pips/trade × 197 trades = +254 pips
+- H2: +2.07 pips/trade × 214 trades = +443 pips
+- **Total: +698 pips over 10y, ~40 trades/year**
+
+**USD_CAD — 6/8 quick configs OOS-stable.** Best: **25/25/16** (1:1 R:R, 4h max)
+- H1: +0.67 × 282 = +189 pips
+- H2: +1.95 × 250 = +487 pips
+- **Total: +676 pips over 10y, ~50 trades/year**
+
+**GBP_USD — only 1/8 quick configs works.** Its edge lives in the slow 60/30
+trades: +790 pips over 10y at ~10 trades/year.
+
+**Other pairs (EUR_USD, JPY pairs) — 0/8 quick configs work** under worst-case
+path ambiguity. Their true expectancy is unknown until we get M1 data.
+
+### Emerging portfolio (pair-specific strategies)
+
+| Pair    | Config                            | Style        | Est. 10y P&L |
+|---------|-----------------------------------|--------------|-------------:|
+| GBP_USD | 60/30 wick+drift+away, 24h max    | Slow bounce  |      +790 p |
+| AUD_USD | 30/15/8 all, 2h max               | Quick 2:1    |      +698 p |
+| USD_CAD | 25/25/16 all, 4h max              | Balanced 1:1 |      +676 p |
+| **Total** |                                   |              |  **+2,164 p** |
+
+~100 trades/year across 3 pairs. All configs OOS-stable at worst-case path
+ambiguity. Modest but real.
+
+### Open questions
+
+- **M1 data during trade windows** would resolve path ambiguity for the
+  4 pairs currently classified as "unknown". Cheap to fetch on-demand
+  (only need M1 bars during our few-hundred trades' forward windows).
+- The reaction study assumed entry at confirm-bar close. Does entering on
+  the touch bar's close (no confirmation wait) change things? Might reveal
+  more setups on the "losing" pairs.
+- Regime effect: AUD_USD H2 edge is 60% larger than H1. Real signal
+  strengthening, or 2020+ tailwind we haven't identified?
+- No spread/slippage costs yet. AUD_USD +1.29 H1 becomes marginal after
+  1.5p spread; USD_CAD +0.67 H1 is similar.
