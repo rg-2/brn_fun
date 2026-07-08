@@ -124,10 +124,13 @@ def download_range(
 ) -> Iterator[Candle]:
     """Yield every candle in [start, end), paginating past the 5000-bar cap.
 
-    Oanda's ``from``/``to`` are inclusive/exclusive respectively, and if the
-    window would produce >5000 bars it returns 5000 starting at ``from``. We
-    advance ``from`` to just after the last bar we received and keep going
-    until the response is short (meaning we've caught up).
+    Oanda's ``from`` is inclusive; ``count`` maxes at 5000. We can't send
+    ``from``+``to`` when the window would exceed 5000 bars (the API rejects
+    the request outright rather than capping), so we paginate by marching
+    ``from`` forward with ``count=5000`` and stop when either:
+
+      - a returned bar is past ``end`` (we've overshot the requested window), or
+      - fewer than 5000 bars come back (we've caught up to the tail of data).
     """
     if end is None:
         end = datetime.now(timezone.utc)
@@ -139,19 +142,22 @@ def download_range(
     api_price, resp_key = _price_component(price)
     client = _client(secrets)
     cursor = start
+    page = 0
 
     while cursor < end:
-        # Oanda rejects `count` when both `from` and `to` are set. The 5000-bar
-        # cap still applies server-side, so we just watch for a full page below
-        # and advance the cursor to paginate.
+        page += 1
         req = InstrumentsCandles(
             instrument=instrument,
             params={
                 "granularity": granularity,
                 "from": _rfc3339(cursor),
-                "to": _rfc3339(end),
+                "count": MAX_CANDLES_PER_REQUEST,
                 "price": api_price,
             },
+        )
+        log.info(
+            "page %d: %s %s from %s (count=%d)",
+            page, instrument, granularity, _rfc3339(cursor), MAX_CANDLES_PER_REQUEST,
         )
         data = _request_with_retry(client, req)
         raws = data.get("candles", [])
@@ -161,10 +167,13 @@ def download_range(
         last_time_str: str | None = None
         for raw in raws:
             candle = _parse_candle(instrument, granularity, resp_key, raw)
+            # Stop as soon as we walk past the requested end.
+            if _parse_rfc3339(candle.time) >= end:
+                return
             yield candle
             last_time_str = candle.time
 
-        # If Oanda didn't hit the cap, we've drained the window.
+        # If Oanda returned less than a full page, we've hit the tail.
         if len(raws) < MAX_CANDLES_PER_REQUEST or last_time_str is None:
             return
 
