@@ -476,8 +476,82 @@ Nearly 2× the earlier M15 portfolio (~+2,164 pips over 10y).
 - Do these pair-specific offsets have any physical interpretation
   (typical microstructure reaction time for that pair)? Or is it
   data-fit at 4 pairs × 3 offsets?
-- Rolling-year check on the M1 portfolio would tighten confidence
-  (still a 5y-split test right now).
+- ~~Rolling-year check on the M1 portfolio would tighten confidence~~
+  **Done — see rolling section below.**
 - **Spread/slippage costs still not modelled.** AUD_USD +3.85 H1 easily
   survives 1.5p spread. USD_CAD +2.06 H1 does too. But borderline pairs
   (EUR_JPY +1.37, GBP_USD +1.36) get eroded.
+
+## 2026-07-08 — Rolling-year and monthly performance check
+
+The H1/H2 split is only two data points. Broke the M1 portfolio down by
+calendar year and month to see how it would have actually performed over
+time. See `analysis/rolling_check.py` and `data/plots/portfolio_equity.pdf`.
+
+### Yearly P&L
+
+| Year | AUD_USD | USD_CAD | EUR_JPY | GBP_USD | Portfolio | Note |
+|------|--------:|--------:|--------:|--------:|----------:|------|
+| 2016 | +353 | +207 | +209 | +453 | **+1,222** | best year |
+| 2017 | +155 | +241 |   +1 |   −8 |    +389 | |
+| 2018 |  +55 | +154 | +159 |  −72 |    +296 | |
+| **2019** |  −24 |  +25 | +106 | −153 |    **−47** | **losing year** |
+| 2020 | +185 |  −59 |  −63 | +271 |    +334 | |
+| 2021 | +284 |  +17 |  +42 |  +28 |    +371 | |
+| 2022 | +446 |  +68 | +239 | +268 | **+1,021** | 2nd best |
+| 2023 | +202 |  +76 | +142 |  +52 |    +472 | |
+| 2024 | +130 | +125 | **−186** |  +69 |    +138 | EUR_JPY bad |
+| 2025 | +226 | **−107** | +124 | **−179** |     +65 | thin |
+| 2026 (H1) |   +2 |  +82 |  −48 |  −44 |     −8 | losing YTD |
+| **Total** | **+2,013** | **+828** | **+725** | **+686** | **+4,253** | |
+
+### Monthly summary
+
+- **127 total months, 82 winning (64.6%), 45 losing (35.4%).**
+- Worst month: 2022-06 (−174 pips). Best: 2022-09 (+483 pips).
+- Best 5 months alone = +1,599 pips (38% of total from 4% of months).
+  Fat right tail — the strategy has upside skew but sit-through periods.
+
+### Concerning patterns
+
+1. **Two exceptional years carry ~half the total.** 2016 (+1,222) + 2022
+   (+1,021) = +2,243 = 53% of the 10y total. Remove those and the strategy
+   makes ~+2,010 over 8 years, i.e. ~+250 pips/year.
+
+2. **Recent decay is real.** 2024 (+138) → 2025 (+65) → 2026 YTD (−8).
+   Per-trade expectancy has been degrading: from ~+1.85 average → +0.32
+   (2025) → ~−0.09 (2026 partial). Could be regime, could be crowding
+   as this pattern gets exploited, could be noise.
+
+3. **Losing streaks exist within each pair.** GBP_USD has losing years
+   2017, 2018, 2019, 2025. AUD_USD had a small loss in 2019. USD_CAD had
+   losing years 2020 and 2025. EUR_JPY had −186 in 2024. Anyone trading
+   a single pair would need serious tolerance.
+
+4. **Portfolio drawdown periods:** 2018-Q4 through mid-2019 (~4-6 months
+   negative), 2020-Q1 (COVID crash), late 2019 similarly rough. Peak
+   drawdown from the equity curve looks like ~500 pips (visible in the
+   PDF, roughly 2018 → 2020).
+
+### What survives this test
+
+- **10-year total is positive**, both halves are positive under the H1/H2
+  split. The signal is real.
+- **Yearly win rate: 9 winning years, 2 losing years (2019 and 2026 partial)**.
+- **Monthly win rate 65%** with fat right tail on the winners.
+- **Diversification helps** — no year had all 4 pairs deeply negative;
+  the losers always had at least one strong offsetter.
+
+### But we should worry about
+
+- **Regime decay in 2024-2026.** Even if the OOS split at 2021 shows both
+  halves positive, the recent trend is a warning. Might be worth
+  re-splitting at 2024 to check whether the strategy still works on
+  "very recent" data.
+- **Concentration in 2016 and 2022 wins.** If those were regime-specific
+  (say, particular volatility environments), we should identify what
+  made those years work.
+- **Per-trade expectancy is small (+1.85 avg).** After realistic spread
+  costs (~1-1.5p per trade), the edge is much thinner. AUD_USD +5.10
+  per trade is comfortable but the others (USD_CAD +1.59, EUR_JPY +1.02,
+  GBP_USD +1.03) get badly eroded.
