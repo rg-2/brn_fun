@@ -1,0 +1,296 @@
+"""Bar-by-bar backtester for round-number touch events.
+
+Takes a stream of ``(touch, context, confirmation, outcome)`` events from
+:func:`brn_fun.analyze.analyze` and simulates simple target-and-stop trades
+against the same bars, so we can see what an actual strategy would earn
+under given entry/target/stop rules.
+
+Key design choices:
+
+- **Entry** at the close of a chosen bar (touch bar or the confirmation
+  bar). Entering at the touch bar's close while filtering on Confirmation
+  features would peek at future info — the CLI defaults to ``confirm`` to
+  avoid that trap.
+- **Direction** follows the physical mean-reversion bet: an ``up`` touch
+  (price rejected at a level from below) is a **short**; a ``down`` touch
+  is a **long**.
+- **Path ambiguity** — when a single M15 bar's range spans both target and
+  stop, we don't know from the bar alone which was hit first. We assume
+  the stop hit first (worst case, conservative). Selectable later.
+- **Timeout** — if neither target nor stop fires within ``max_bars`` bars,
+  close at that bar's close.
+
+Positions are independent — overlapping trades are allowed. Position
+management (sizing, exposure caps, one-at-a-time) is a strategy layer
+concern, not a backtester concern.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from statistics import mean
+from typing import Callable, Iterable, Literal, Sequence
+
+from .analyze import Confirmation, Context, Touch
+from .db import Candle
+
+Direction = Literal["long", "short"]
+ExitReason = Literal["target", "stop", "timeout"]
+PathAmbiguity = Literal["worst", "best"]
+
+
+@dataclass(frozen=True, slots=True)
+class Trade:
+    """One simulated trade from entry to exit."""
+
+    entry_idx: int
+    entry_time: str
+    entry_price: float
+    direction: Direction
+    level: float               # the round-number level that triggered the entry
+    target_price: float
+    stop_price: float
+    exit_idx: int
+    exit_time: str
+    exit_price: float
+    exit_reason: ExitReason
+    pnl_price: float           # signed, in price units (positive = win)
+    hold_bars: int
+
+
+# --- Named filter registry --------------------------------------------------
+#
+# Filters take a (Touch, Context, Confirmation) triple and a ``pip`` size,
+# and return True if the event should be traded. Keeping them here (not in
+# the CLI) makes them versionable: a run reproducing an old result can
+# check out the same commit and get the same filter definition.
+
+FilterFn = Callable[[Touch, Context, Confirmation, float], bool]
+
+
+def _filter_all(t: Touch, c: Context, cf: Confirmation, pip: float) -> bool:
+    return True
+
+
+def _filter_wick(t: Touch, c: Context, cf: Confirmation, pip: float) -> bool:
+    return c.wick_only
+
+
+def _filter_wick_drift(t: Touch, c: Context, cf: Confirmation, pip: float) -> bool:
+    # "Not sprint" = approach change (over 20 bars) at most ~65 pips.
+    return c.wick_only and abs(c.approach_change) <= 65 * pip
+
+
+def _filter_wick_drift_away(
+    t: Touch, c: Context, cf: Confirmation, pip: float,
+) -> bool:
+    # The cross-pair-validated combo. Requires the confirmation bar to exist.
+    return (
+        c.wick_only
+        and abs(c.approach_change) <= 65 * pip
+        and cf.present
+        and cf.close_away
+    )
+
+
+FILTERS: dict[str, FilterFn] = {
+    "all": _filter_all,
+    "wick": _filter_wick,
+    "wick+drift": _filter_wick_drift,
+    "wick+drift+away": _filter_wick_drift_away,
+}
+
+
+def uses_confirmation(filter_name: str) -> bool:
+    """Return True if the filter reads Confirmation fields.
+
+    Used by the CLI to default the entry mode to ``confirm`` when the
+    filter needs the confirmation bar to have closed.
+    """
+    return filter_name in ("wick+drift+away",)
+
+
+# --- Single-trade simulation -----------------------------------------------
+
+
+def simulate_trade(
+    bars: Sequence[Candle],
+    entry_idx: int,
+    direction: Direction,
+    entry_price: float,
+    target_price: float,
+    stop_price: float,
+    max_bars: int,
+    path_ambiguity: PathAmbiguity = "worst",
+) -> tuple[int, str, float, ExitReason]:
+    """Walk forward from ``entry_idx + 1``; return (exit_idx, exit_time, exit_price, reason)."""
+    for offset in range(1, max_bars + 1):
+        j = entry_idx + offset
+        if j >= len(bars):
+            break
+        bar = bars[j]
+
+        if direction == "long":
+            hit_target = bar.high >= target_price
+            hit_stop = bar.low <= stop_price
+        else:  # short
+            hit_target = bar.low <= target_price
+            hit_stop = bar.high >= stop_price
+
+        if hit_target and hit_stop:
+            # Same bar contains both prices. We can't tell from OHLC alone
+            # which fired first; the conservative assumption is stop-first.
+            if path_ambiguity == "worst":
+                return j, bar.time, stop_price, "stop"
+            else:
+                return j, bar.time, target_price, "target"
+        if hit_target:
+            return j, bar.time, target_price, "target"
+        if hit_stop:
+            return j, bar.time, stop_price, "stop"
+
+    # Neither fired within max_bars — close at the last bar's close.
+    last_j = min(entry_idx + max_bars, len(bars) - 1)
+    return last_j, bars[last_j].time, bars[last_j].close, "timeout"
+
+
+# --- Event-stream driver ---------------------------------------------------
+
+
+def backtest_touches(
+    bars: Sequence[Candle],
+    events: Iterable[tuple[Touch, Context, Confirmation, object]],
+    *,
+    pip: float = 0.0001,
+    filter_name: str = "wick+drift+away",
+    entry: Literal["touch", "confirm"] = "confirm",
+    target_pips: float = 60.0,
+    stop_pips: float = 30.0,
+    target_atr: float | None = None,
+    stop_atr: float | None = None,
+    max_bars: int = 96,
+    path_ambiguity: PathAmbiguity = "worst",
+) -> list[Trade]:
+    """Run a target/stop simulation over the filtered events.
+
+    Thresholds are pip-based by default; set ``target_atr`` / ``stop_atr`` to
+    an ATR multiplier to scale per-touch. Mixing is allowed.
+    """
+    if filter_name not in FILTERS:
+        raise ValueError(
+            f"unknown filter {filter_name!r}; known: {sorted(FILTERS)}"
+        )
+    filter_fn = FILTERS[filter_name]
+    trades: list[Trade] = []
+
+    for touch, context, confirmation, _outcome in events:
+        if not filter_fn(touch, context, confirmation, pip):
+            continue
+
+        # Decide the entry bar. "confirm" needs bar touch+1 to exist.
+        if entry == "touch":
+            entry_idx = touch.idx
+        else:
+            entry_idx = touch.idx + 1
+        if entry_idx >= len(bars):
+            continue
+
+        entry_price = bars[entry_idx].close
+
+        # Physical bet: up-touch means we expect price to REJECT from above,
+        # so short; down-touch means bounce up, so long.
+        direction: Direction = "short" if touch.direction == "up" else "long"
+
+        # Per-trade thresholds.
+        target_dist = (
+            target_atr * context.atr if target_atr is not None
+            else target_pips * pip
+        )
+        stop_dist = (
+            stop_atr * context.atr if stop_atr is not None
+            else stop_pips * pip
+        )
+        if direction == "long":
+            target_price = entry_price + target_dist
+            stop_price = entry_price - stop_dist
+        else:
+            target_price = entry_price - target_dist
+            stop_price = entry_price + stop_dist
+
+        exit_idx, exit_time, exit_price, reason = simulate_trade(
+            bars, entry_idx, direction, entry_price,
+            target_price, stop_price, max_bars, path_ambiguity,
+        )
+
+        pnl = (
+            exit_price - entry_price if direction == "long"
+            else entry_price - exit_price
+        )
+
+        trades.append(Trade(
+            entry_idx=entry_idx,
+            entry_time=bars[entry_idx].time,
+            entry_price=entry_price,
+            direction=direction,
+            level=touch.level,
+            target_price=target_price,
+            stop_price=stop_price,
+            exit_idx=exit_idx,
+            exit_time=exit_time,
+            exit_price=exit_price,
+            exit_reason=reason,
+            pnl_price=pnl,
+            hold_bars=exit_idx - entry_idx,
+        ))
+
+    return trades
+
+
+# --- Summary stats ---------------------------------------------------------
+
+
+def summarize_trades(trades: list[Trade], pip: float = 0.0001) -> dict:
+    """Aggregate win rate, expectancy, and drawdown (all in pips)."""
+    if not trades:
+        return {
+            "n": 0, "win_rate": 0.0,
+            "avg_win_pips": 0.0, "avg_loss_pips": 0.0,
+            "expectancy_pips": 0.0, "total_pips": 0.0,
+            "max_drawdown_pips": 0.0,
+            "target": 0, "stop": 0, "timeout": 0,
+            "avg_hold_bars": 0.0,
+        }
+
+    wins = [t for t in trades if t.pnl_price > 0]
+    losses = [t for t in trades if t.pnl_price < 0]
+
+    total_price = sum(t.pnl_price for t in trades)
+    expectancy_price = total_price / len(trades)
+
+    # Running equity curve → peak-to-trough drawdown.
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for t in trades:
+        equity += t.pnl_price
+        if equity > peak:
+            peak = equity
+        drawdown = peak - equity
+        if drawdown > max_dd:
+            max_dd = drawdown
+
+    reasons = Counter(t.exit_reason for t in trades)
+    return {
+        "n": len(trades),
+        "win_rate": len(wins) / len(trades) * 100,
+        "avg_win_pips": mean(t.pnl_price for t in wins) / pip if wins else 0.0,
+        "avg_loss_pips": mean(t.pnl_price for t in losses) / pip if losses else 0.0,
+        "expectancy_pips": expectancy_price / pip,
+        "total_pips": total_price / pip,
+        "max_drawdown_pips": max_dd / pip,
+        "target": reasons["target"],
+        "stop": reasons["stop"],
+        "timeout": reasons["timeout"],
+        "avg_hold_bars": mean(t.hold_bars for t in trades),
+    }

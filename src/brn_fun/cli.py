@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 
 from .analyze import TIERS, analyze, grid_for, summarize_outcomes
+from .backtest import FILTERS, backtest_touches, summarize_trades, uses_confirmation
 from .config import Granularity, load_config, load_secrets
 from .db import connect, count_candles, fetch_candles, latest_time, upsert_candles
 from .oanda import download_range, download_recent
@@ -434,6 +435,171 @@ def _export_touches(
                 f"{o.favorable / pip:.1f}", f"{o.adverse / pip:.1f}",
                 f"{o.close_after:.5f}", f"{o.close_dist / pip:.1f}",
                 o.window_bars, o.tag,
+            ])
+
+
+@cli.command()
+@click.argument("instrument")
+@click.option("--granularity", "-g", type=str, default=None)
+@click.option("--tier", type=click.Choice(list(TIERS.keys())), default="figure",
+              show_default=True)
+@click.option("--grid", type=float, default=None,
+              help="Numeric grid override; wins over --tier.")
+@click.option("--pip", type=float, default=0.0001, show_default=True,
+              help="Pip size (0.0001 majors, 0.01 JPY pairs).")
+@click.option("--cooldown-bars", type=int, default=480, show_default=True)
+@click.option("--forward-bars", type=int, default=96, show_default=True,
+              help="Analyze-window bars (used to tag outcomes for reference).")
+@click.option("--filter", "filter_name",
+              type=click.Choice(list(FILTERS.keys())),
+              default="wick+drift+away", show_default=True,
+              help="Named entry filter — see backtest.FILTERS.")
+@click.option("--entry", type=click.Choice(["touch", "confirm"]), default=None,
+              help="Bar to enter at. Defaults to 'confirm' when the filter "
+                   "uses confirmation features (avoids peeking).")
+@click.option("--target-pips", type=float, default=60.0, show_default=True)
+@click.option("--stop-pips",   type=float, default=30.0, show_default=True)
+@click.option("--target-atr", type=float, default=None,
+              help="If set, target = this multiplier × per-touch ATR "
+                   "(overrides --target-pips).")
+@click.option("--stop-atr", type=float, default=None,
+              help="If set, stop = this multiplier × per-touch ATR "
+                   "(overrides --stop-pips).")
+@click.option("--max-bars", type=int, default=96, show_default=True,
+              help="Timeout: bars to hold before closing at market.")
+@click.option("--path-ambiguity", type=click.Choice(["worst", "best"]),
+              default="worst", show_default=True,
+              help="If a bar contains both target and stop, which fires first.")
+@click.option("--complete-only/--all", default=True, show_default=True,
+              help="Skip the currently-forming bar when reading history.")
+@click.option("--head", type=int, default=10, show_default=True,
+              help="Trades to print in the tail table.")
+@click.option("--export", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="Write per-trade rows to CSV.")
+@click.pass_context
+def backtest(
+    ctx: click.Context,
+    instrument: str,
+    granularity: str | None,
+    tier: str,
+    grid: float | None,
+    pip: float,
+    cooldown_bars: int,
+    forward_bars: int,
+    filter_name: str,
+    entry: str | None,
+    target_pips: float,
+    stop_pips: float,
+    target_atr: float | None,
+    stop_atr: float | None,
+    max_bars: int,
+    path_ambiguity: str,
+    complete_only: bool,
+    head: int,
+    export: Path | None,
+) -> None:
+    """Backtest a target/stop strategy driven by round-number touch events."""
+    cfg = ctx.obj["config"]
+    gran = granularity or cfg.default_granularity
+    grid_val = float(grid) if grid is not None else grid_for(tier)
+
+    # Pick a safe default entry mode based on whether the filter peeks.
+    if entry is None:
+        entry = "confirm" if uses_confirmation(filter_name) else "touch"
+
+    with connect(cfg.db_path) as conn:
+        bars = fetch_candles(
+            conn, instrument, gran, limit=None, order="asc",
+            complete_only=complete_only,
+        )
+    if not bars:
+        click.echo(f"No {gran} bars stored for {instrument} — run `brn download` first.")
+        return
+
+    events = list(analyze(
+        bars,
+        grid=grid_val, cooldown_bars=cooldown_bars, forward_bars=forward_bars,
+        pip=pip,
+    ))
+    trades = backtest_touches(
+        bars, events,
+        pip=pip,
+        filter_name=filter_name,
+        entry=entry,  # type: ignore[arg-type]
+        target_pips=target_pips, stop_pips=stop_pips,
+        target_atr=target_atr, stop_atr=stop_atr,
+        max_bars=max_bars,
+        path_ambiguity=path_ambiguity,  # type: ignore[arg-type]
+    )
+    stats = summarize_trades(trades, pip=pip)
+
+    tgt_desc = f"{target_atr:g}×ATR" if target_atr is not None else f"{target_pips:g}p"
+    stp_desc = f"{stop_atr:g}×ATR"   if stop_atr   is not None else f"{stop_pips:g}p"
+
+    click.echo(
+        f"{instrument} {gran}   filter={filter_name}   entry={entry}   "
+        f"target={tgt_desc}   stop={stp_desc}   max_bars={max_bars}"
+    )
+    if bars:
+        click.echo(f"span: {bars[0].time} → {bars[-1].time}   ({len(bars):,} bars)")
+
+    if stats["n"] == 0:
+        click.echo("No trades — the filter matched nothing.")
+        return
+
+    click.echo(
+        f"trades: {stats['n']}   win rate: {stats['win_rate']:.1f}%   "
+        f"expectancy: {stats['expectancy_pips']:+.1f} pips/trade   "
+        f"total: {stats['total_pips']:+.1f} pips"
+    )
+    click.echo(
+        f"avg win: {stats['avg_win_pips']:+.1f} pips   "
+        f"avg loss: {stats['avg_loss_pips']:+.1f} pips   "
+        f"max drawdown: {stats['max_drawdown_pips']:.1f} pips"
+    )
+    click.echo(
+        f"exits: target={stats['target']}  stop={stats['stop']}  "
+        f"timeout={stats['timeout']}   avg hold: {stats['avg_hold_bars']:.1f} bars"
+    )
+
+    if head > 0:
+        click.echo("")
+        click.echo(
+            f"{'entry_time':<30}  dir    lvl     entry     exit   "
+            f"{'pnl':>6}  reason   hold"
+        )
+        for t in trades[-head:]:
+            click.echo(
+                f"{t.entry_time:<30}  {t.direction:<5}  {t.level:>6.4f}  "
+                f"{t.entry_price:>7.5f}  {t.exit_price:>7.5f}  "
+                f"{t.pnl_price / pip:>+6.1f}  {t.exit_reason:<7}  {t.hold_bars:>4d}"
+            )
+        click.echo(f"(showing last {min(head, len(trades))} of {len(trades)})")
+
+    if export is not None:
+        _export_trades(export, trades, pip=pip)
+        click.echo(f"\nwrote {len(trades)} trades to {export}")
+
+
+def _export_trades(path: Path, trades: list, *, pip: float) -> None:
+    """CSV export of trades. Prices as-is, PnL in pips."""
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow([
+            "entry_time", "entry_idx", "direction", "level",
+            "entry_price", "target_price", "stop_price",
+            "exit_time", "exit_idx", "exit_price", "exit_reason",
+            "pnl_pips", "hold_bars",
+        ])
+        for t in trades:
+            w.writerow([
+                t.entry_time, t.entry_idx, t.direction, f"{t.level:.5f}",
+                f"{t.entry_price:.5f}", f"{t.target_price:.5f}", f"{t.stop_price:.5f}",
+                t.exit_time, t.exit_idx, f"{t.exit_price:.5f}", t.exit_reason,
+                f"{t.pnl_price / pip:+.1f}", t.hold_bars,
             ])
 
 
