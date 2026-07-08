@@ -141,13 +141,15 @@ def download_range(
     cursor = start
 
     while cursor < end:
+        # Oanda rejects `count` when both `from` and `to` are set. The 5000-bar
+        # cap still applies server-side, so we just watch for a full page below
+        # and advance the cursor to paginate.
         req = InstrumentsCandles(
             instrument=instrument,
             params={
                 "granularity": granularity,
                 "from": _rfc3339(cursor),
                 "to": _rfc3339(end),
-                "count": MAX_CANDLES_PER_REQUEST,
                 "price": api_price,
             },
         )
