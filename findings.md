@@ -213,4 +213,107 @@ capture with fixed target/stop rules.
   the equity-curve dynamics.
 - One-position-at-a-time vs overlapping: currently all events trade.
 - Trend / session / hour filters within the winning combo — do they help further?
-- Out-of-sample time slices (H1 vs H2 on the strategy P&L, not just edge).
+- ~~Out-of-sample time slices (H1 vs H2 on the strategy P&L, not just edge).~~ **Done — see below.**
+
+## 2026-07-08 — 10-year OOS split on strategy P&L (the honest test)
+
+Extended history to 10 years (2016-01-01 → 2026-07-08, ~261K M15 bars per pair).
+Ran the previously-declared winning config (`wick+drift+away`, 90p target,
+30p stop, entry=confirm, worst-case path) split at **2021-01-01**.
+
+### The winner didn't generalize
+
+| Pair | H1 exp | H1 total | H2 exp | H2 total | Verdict |
+|---|---:|---:|---:|---:|:--|
+| EUR_USD | −5.1 | −271 | +0.2 | +9 | ⚠ FLIP |
+| GBP_USD | +7.6 | +410 | +9.3 | +380 | ✓ both+ |
+| AUD_USD | −0.9 | −41 | +13.1 | +549 | ⚠ FLIP |
+| USD_CAD | +2.4 | +126 | −5.8 | −254 | ⚠ FLIP |
+| USD_JPY | +0.8 | +39 | +3.6 | +210 | ✓ both+ |
+| EUR_JPY | −6.3 | −345 | +0.4 | +24 | ⚠ FLIP |
+| GBP_JPY | −10.0 | −448 | +1.4 | +83 | ⚠ FLIP |
+
+- **Aggregate H1: −530 pips (−1.50 / trade).** Losing.
+- **Aggregate H2: +1000 pips (+2.73 / trade).** Winning.
+- **5 of 7 pairs FLIPPED signs.** The 5-year winner was regime-driven, not
+  a true generalization.
+
+### Robustness sweep — 11 configs × 7 pairs × 2 halves
+
+Ran a full sweep looking for any config that's positive in *both* halves on
+aggregate (see `analysis/sweep_oos.py`). Ranked by min(H1 exp, H2 exp):
+
+| Config | min(H1, H2) exp | Both-halves-positive pairs |
+|---|---:|---:|
+| all events 90/30 (no filter) | **+0.02** ✓ | 2/7 |
+| wick+drift 60/30 | −0.40 | 2/7 |
+| wick-only 60/30 | −0.90 | 2/7 |
+| wick+drift 90/30 | −0.96 | 2/7 |
+| 60/30 default (our previous winner!) | −1.19 | 1/7 |
+| 90/30 (3:1) | −1.50 | 2/7 |
+| 3×ATR / 1.5×ATR | −1.94 | 2/7 |
+
+**Only "all events 90/30" is time-stable on aggregate — and only barely
+(min exp +0.02).** Every other config flips signs. This is a strong signal
+that our filter machinery was tuned to H2 characteristics.
+
+### Per-pair truth: it's a two-pair strategy
+
+Counting how many of the 10 configs each pair is positive in *both* halves:
+
+| Pair | Configs stable both halves | Notes |
+|---|---:|---|
+| **GBP_USD** | **7/10** | ROBUST across most configs. 60/30 default gives +7.9/+7.9 — remarkably flat. |
+| **AUD_USD** | **4/10** | Robust with `wick` / `wick+drift` / no filter; the `wick+drift+away` variants over-fit. |
+| USD_JPY | 3/10 | Config-sensitive; only three combos survive. |
+| EUR_JPY | 1/10 | Only marginal (+0.2/+0.0 on all-events). |
+| **EUR_USD** | 0/10 | Not profitable in any config both-halves. |
+| **USD_CAD** | 0/10 | Same. |
+| **GBP_JPY** | 0/10 | Same. |
+
+**GBP_USD and AUD_USD are the only two pairs that survive out-of-sample.**
+The "cross-pair validated" narrative from earlier was a 5-year artifact.
+
+### Time-stable strategy candidates
+
+Two candidates emerge from the sweep — each has a config where BOTH halves
+are positive:
+
+1. **GBP_USD, `wick+drift+away`, 60/30 target/stop**
+   - H1 (2016-2020): +7.9 pips/trade, ~54 trades → +410 pips
+   - H2 (2021-2026): +7.9 pips/trade, ~41 trades → +380 pips
+   - ~10 trades/year, ~790 pips over 10 years
+   - Extremely flat across halves — the strongest signal we have.
+
+2. **AUD_USD, `wick-only` filter, 60/30 target/stop**
+   - H1: +2.8 pips/trade, ~104 trades → +291 pips
+   - H2: +10.0 pips/trade, ~101 trades → +1010 pips
+   - ~20 trades/year, ~1300 pips over 10 years
+   - Positive in both halves but H2 nearly 4× the edge → possible regime tailwind.
+
+**Combined portfolio: ~30 trades/year, +2000 pips over 10 years, robust to
+the H1/H2 split.** Modest but honest.
+
+### What didn't work
+
+- The `wick+drift+away` filter (our earlier "cross-pair winner") only survives
+  for GBP_USD out of sample. Everywhere else it's a regime artifact.
+- ATR-scaled thresholds didn't help — they didn't hurt either, but they don't
+  fix the fundamental regime dependency.
+- Tighter R:R (4:1 via 60/15) is actively bad in H1.
+- The 5-year "wick+drift+away is our winner" conclusion was substantially wrong
+  when the H1 window was included.
+
+### Open questions
+
+- Realistic spread / slippage costs — GBP_USD ~1p, AUD_USD ~1.5p per round-trip.
+  Would eat 1-2 pips of expectancy. GBP_USD's +7.9 is comfortable; AUD_USD's
+  H1 +2.8 is marginal after costs.
+- Is a rolling-year edge chart different from H1/H2? Might reveal narrower
+  windows where even our survivors flip.
+- Why did the confirmation filter over-fit? Guessing: `confirm_close_away`
+  captured a market microstructure feature (post-touch mean-reversion in
+  H2's algo-driven regime) that wasn't as strong pre-2021.
+- Can we exploit the fact that AUD_USD prefers simpler filters — is there a
+  meta-signal (volatility regime, pair category) that tells us which filter
+  to use?
