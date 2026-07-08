@@ -251,6 +251,10 @@ def show(
               help="Write per-touch rows to CSV.")
 @click.option("--head", type=int, default=15, show_default=True,
               help="How many recent touches to print in the table.")
+@click.option("--atr-period", type=int, default=14, show_default=True,
+              help="Bars used for ATR at time of touch.")
+@click.option("--approach-bars", type=int, default=20, show_default=True,
+              help="Bars used for approach-change / approach-range features.")
 @click.pass_context
 def touches(
     ctx: click.Context,
@@ -266,6 +270,8 @@ def touches(
     complete_only: bool,
     export: Path | None,
     head: int,
+    atr_period: int,
+    approach_bars: int,
 ) -> None:
     """Find round-number 'first-touch-in-a-while' events and tag outcomes."""
     cfg = ctx.obj["config"]
@@ -286,6 +292,7 @@ def touches(
         bars,
         grid=grid_val, cooldown_bars=cooldown_bars, forward_bars=forward_bars,
         bounce_pips=bounce_pips, break_pips=break_pips, pip=pip,
+        atr_period=atr_period, approach_bars=approach_bars,
     ))
 
     summary = summarize_outcomes(iter(events))
@@ -311,16 +318,22 @@ def touches(
 
     if events:
         click.echo("")
+        # Wick vs body is single-char to keep the table narrow (W = wick-only).
         click.echo(
             f"{'time':<30}  {'level':>7}  {'dir':<4}  "
+            f"{'atr':>5}  {'appr':>6}  wb  "
             f"{'fav':>6}  {'adv':>6}  {'outcome':<7}"
         )
-        for t, o in events[-head:]:
+        for t, c, o in events[-head:]:
+            wb = "W" if c.wick_only else "b"
             click.echo(
                 f"{t.time:<30}  {t.level:>7.4f}  {t.direction:<4}  "
+                f"{c.atr / pip:>5.1f}  {c.approach_change / pip:>+6.1f}  {wb}   "
                 f"{o.favorable / pip:>6.1f}  {o.adverse / pip:>6.1f}  {o.tag:<7}"
             )
         click.echo(f"(showing last {min(head, len(events))} of {len(events)})")
+        click.echo("legend: atr=14-bar ATR pips, appr=close change over 20 bars, "
+                   "wb=W wick-only / b body-touch")
 
     if export is not None:
         _export_touches(export, events, pip=pip)
@@ -329,7 +342,7 @@ def touches(
 
 def _export_touches(
     path: Path,
-    events: list,  # list[tuple[Touch, Outcome_]]
+    events: list,  # list[tuple[Touch, Context, Outcome_]]
     *,
     pip: float,
 ) -> None:
@@ -341,12 +354,17 @@ def _export_touches(
         w = csv.writer(fh)
         w.writerow([
             "time", "bar_idx", "level", "direction", "cooldown_bars",
+            "atr_pips", "hour_utc", "dow",
+            "approach_change_pips", "approach_range_pips", "wick_only",
             "favorable_pips", "adverse_pips", "close_after", "close_dist_pips",
             "window_bars", "outcome",
         ])
-        for t, o in events:
+        for t, c, o in events:
             w.writerow([
                 t.time, t.idx, f"{t.level:.5f}", t.direction, t.cooldown_bars,
+                f"{c.atr / pip:.1f}", c.hour_utc, c.dow,
+                f"{c.approach_change / pip:+.1f}", f"{c.approach_range / pip:.1f}",
+                int(c.wick_only),
                 f"{o.favorable / pip:.1f}", f"{o.adverse / pip:.1f}",
                 f"{o.close_after:.5f}", f"{o.close_dist / pip:.1f}",
                 o.window_bars, o.tag,

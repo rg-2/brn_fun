@@ -27,3 +27,7 @@
 1. This will run on my 'dev' linux machine
 2. Will be accessible on the trailsend-srv website, so I can run tests and analysis and see results there.
 3. We can edit code, etc right in git hub, and use a publish action to test strategies, i think, unless there is a better way.
+
+### Things to not forget
+1. Is there a pattern after the touch? Confirmation bar, engulfing bar, pin-bar, bull nose, etc.
+2. Should we look for long term trend continuation

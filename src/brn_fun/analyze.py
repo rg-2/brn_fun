@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Iterable, Iterator, Literal, Sequence
 
 from .db import Candle
@@ -52,6 +53,22 @@ class Outcome_:
     close_dist: float           # signed: close_after - level
     window_bars: int            # actual bars in the forward window (may be < forward_bars near tail)
     tag: Outcome
+
+
+@dataclass(frozen=True, slots=True)
+class Context:
+    """State of the market at the moment of the touch (backward-looking).
+
+    Everything here is computable from bars up to and including the touch,
+    so it's fair game for a real-time strategy — no forward peeking.
+    """
+
+    atr: float                  # 14-bar Average True Range in price units
+    hour_utc: int               # 0..23, from the bar's timestamp
+    dow: int                    # 0=Mon .. 6=Sun
+    approach_change: float      # close_touch - close_N_bars_ago (signed price units)
+    approach_range: float       # max(H) - min(L) over last N bars (price units)
+    wick_only: bool             # True iff the level sits outside the bar's body
 
 
 def _round_levels_in(low: float, high: float, grid: float) -> list[float]:
@@ -182,6 +199,80 @@ def characterize_touch(
     )
 
 
+def compute_context(
+    bars: Sequence[Candle],
+    touch: Touch,
+    *,
+    atr_period: int = 14,
+    approach_bars: int = 20,
+) -> Context:
+    """Compute backward-looking features at the moment of the touch.
+
+    ATR uses the classic Wilder-style average of True Range. If we don't have
+    ``atr_period + 1`` bars of history, we use whatever's available so early
+    events aren't discarded — they'll just have a noisier ATR estimate.
+    """
+    i = touch.idx
+    touch_bar = bars[i]
+
+    # --- ATR: average of true range over the last `atr_period` bars up to i.
+    tr_values: list[float] = []
+    start = max(1, i - atr_period + 1)
+    for j in range(start, i + 1):
+        prev_close = bars[j - 1].close
+        tr = max(
+            bars[j].high - bars[j].low,
+            abs(bars[j].high - prev_close),
+            abs(bars[j].low - prev_close),
+        )
+        tr_values.append(tr)
+    if i == 0:
+        # No prior bar → fall back to the touching bar's range as best-effort.
+        atr = bars[0].high - bars[0].low
+    else:
+        atr = sum(tr_values) / len(tr_values)
+
+    # --- Time features. Parse the RFC3339 timestamp; UTC by construction.
+    dt = _parse_touch_time(touch_bar.time)
+    hour_utc = dt.hour
+    dow = dt.weekday()
+
+    # --- Approach features over the last `approach_bars` bars up to i.
+    a_start = max(0, i - approach_bars)
+    approach_window = bars[a_start : i + 1]
+    approach_change = touch_bar.close - bars[a_start].close
+    approach_range = (
+        max(b.high for b in approach_window) - min(b.low for b in approach_window)
+    )
+
+    # --- Wick vs body: is the level outside the touching bar's [open, close]?
+    body_low = min(touch_bar.open, touch_bar.close)
+    body_high = max(touch_bar.open, touch_bar.close)
+    wick_only = touch.level < body_low or touch.level > body_high
+
+    return Context(
+        atr=atr,
+        hour_utc=hour_utc,
+        dow=dow,
+        approach_change=approach_change,
+        approach_range=approach_range,
+        wick_only=wick_only,
+    )
+
+
+def _parse_touch_time(s: str) -> datetime:
+    """Parse Oanda-style RFC3339 (nanosecond precision) into a UTC datetime."""
+    # Match _parse_rfc3339 in oanda.py, kept local to avoid a public re-export.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    if "." in s:
+        head, tail = s.split(".", 1)
+        frac, tz = tail[:-6], tail[-6:]
+        frac = (frac + "000000")[:6]
+        s = f"{head}.{frac}{tz}"
+    return datetime.fromisoformat(s)
+
+
 def analyze(
     bars: Sequence[Candle],
     *,
@@ -191,9 +282,14 @@ def analyze(
     bounce_pips: float = 30.0,
     break_pips: float = 30.0,
     pip: float = 0.0001,
-) -> Iterator[tuple[Touch, Outcome_]]:
-    """Convenience: pair each touch with its outcome in one iterator."""
+    atr_period: int = 14,
+    approach_bars: int = 20,
+) -> Iterator[tuple[Touch, Context, Outcome_]]:
+    """Yield (touch, context, outcome) triples — everything for one event."""
     for touch in find_first_touches(bars, grid=grid, cooldown_bars=cooldown_bars):
+        context = compute_context(
+            bars, touch, atr_period=atr_period, approach_bars=approach_bars,
+        )
         outcome = characterize_touch(
             bars, touch,
             forward_bars=forward_bars,
@@ -201,7 +297,7 @@ def analyze(
             break_pips=break_pips,
             pip=pip,
         )
-        yield touch, outcome
+        yield touch, context, outcome
 
 
 # --- Tier helper for the CLI --------------------------------------------------
@@ -221,14 +317,14 @@ def grid_for(tier_or_number: str | float) -> float:
 
 
 def summarize_outcomes(
-    events: Iterable[tuple[Touch, Outcome_]],
+    events: Iterable[tuple[Touch, Context, Outcome_]],
 ) -> dict[str, int | float]:
-    """Roll up an iterable of (touch, outcome) into counts + averages."""
+    """Roll up an iterable of (touch, context, outcome) triples."""
     n = 0
     tags = {"bounce": 0, "break": 0, "both": 0, "chop": 0}
     fav_sum = 0.0
     adv_sum = 0.0
-    for _t, o in events:
+    for _t, _c, o in events:
         n += 1
         tags[o.tag] += 1
         fav_sum += o.favorable

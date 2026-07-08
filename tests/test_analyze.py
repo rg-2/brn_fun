@@ -6,6 +6,7 @@ from brn_fun.analyze import (
     _round_levels_in,
     analyze,
     characterize_touch,
+    compute_context,
     find_first_touches,
 )
 from brn_fun.db import Candle
@@ -179,15 +180,78 @@ def test_chop_when_flat() -> None:
     assert outcome.tag == "chop"
 
 
-def test_analyze_iterates_pairs() -> None:
-    """The convenience `analyze` iterator returns (touch, outcome) pairs."""
+def test_analyze_iterates_triples() -> None:
+    """The convenience `analyze` iterator returns (touch, context, outcome)."""
     bars = [
-        _c("pre", 1.09, 1.095, close=1.094),
-        _c("touch", 1.099, 1.101, close=1.100),
-        _c("f1", 1.093, 1.099, close=1.094),
+        _c("2024-01-02T09:00:00.000000000Z", 1.09, 1.095, close=1.094),
+        _c("2024-01-02T09:15:00.000000000Z", 1.099, 1.101, close=1.100, open_=1.0995),
+        _c("2024-01-02T09:30:00.000000000Z", 1.093, 1.099, close=1.094),
     ]
-    pairs = list(analyze(bars, grid=0.01, cooldown_bars=100, forward_bars=5))
-    assert len(pairs) == 1
-    t, o = pairs[0]
+    triples = list(analyze(bars, grid=0.01, cooldown_bars=100, forward_bars=5))
+    assert len(triples) == 1
+    t, c, o = triples[0]
     assert t.level == 1.10
     assert o.tag == "bounce"
+    # Context has been populated with real values.
+    assert c.hour_utc == 9
+    assert c.dow == 1  # Tuesday
+    assert c.atr > 0
+
+
+# --- compute_context ---------------------------------------------------------
+
+def test_context_atr_from_bar_ranges() -> None:
+    """ATR is roughly the average of bar high-low over the lookback."""
+    # Keep the priming bars strictly between 1.10 and 1.11 so nothing else
+    # gets registered as a first-touch (which would suppress our real touch
+    # via the cooldown map).
+    bars = [
+        _c("2024-01-02T00:00:00.000000000Z", 1.101, 1.104, close=1.102),
+        _c("2024-01-02T00:15:00.000000000Z", 1.101, 1.106, close=1.105),
+        _c("2024-01-02T00:30:00.000000000Z", 1.103, 1.108, close=1.106),
+        _c("2024-01-02T00:45:00.000000000Z", 1.099, 1.101, close=1.100),  # touch bar
+    ]
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
+    assert len(touches) == 1
+    ctx = compute_context(bars, touches[0], atr_period=3, approach_bars=3)
+    # Roughly 50 pips of range on average. Not asserting exact — depends on
+    # true-range vs simple-range with gaps — just want positive, sane order.
+    assert 0.003 < ctx.atr < 0.008
+
+
+def test_context_wick_only_vs_body() -> None:
+    """Wick-only when level sits outside the bar's [open, close] body."""
+    bars = [
+        _c("2024-01-02T00:00:00.000000000Z", 1.09, 1.095, close=1.094),
+        # Body 1.095-1.099, wick up to 1.101 → level 1.10 is above body.
+        _c("2024-01-02T00:15:00.000000000Z", 1.094, 1.101, open_=1.095, close=1.099),
+    ]
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
+    ctx = compute_context(bars, touches[0])
+    assert ctx.wick_only is True
+
+    # Now a body-touch: body straddles the level.
+    bars2 = [
+        _c("2024-01-02T00:00:00.000000000Z", 1.09, 1.095, close=1.094),
+        _c("2024-01-02T00:15:00.000000000Z", 1.098, 1.102, open_=1.099, close=1.101),
+    ]
+    touches2 = list(find_first_touches(bars2, grid=0.01, cooldown_bars=100))
+    ctx2 = compute_context(bars2, touches2[0])
+    assert ctx2.wick_only is False
+
+
+def test_context_approach_change_signed() -> None:
+    """approach_change is signed close-of-touch minus close-N-back."""
+    # Priming bars stay strictly inside (1.09, 1.10) so no premature touches.
+    bars = [
+        _c("2024-01-02T00:00:00.000000000Z", 1.091, 1.093, close=1.092),
+        _c("2024-01-02T00:15:00.000000000Z", 1.093, 1.096, close=1.095),
+        _c("2024-01-02T00:30:00.000000000Z", 1.096, 1.099, close=1.098),
+        _c("2024-01-02T00:45:00.000000000Z", 1.099, 1.101, close=1.100),  # touch
+    ]
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
+    assert len(touches) == 1 and touches[0].level == 1.10
+    ctx = compute_context(bars, touches[0], approach_bars=3)
+    # Close moved from 1.092 → 1.100 over the 3-bar approach window: +80 pips.
+    assert ctx.approach_change > 0
+    assert abs(ctx.approach_change - 0.008) < 1e-6
