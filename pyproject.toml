@@ -1,0 +1,30 @@
+[project]
+name = "brn-fun"
+version = "0.1.0"
+description = "Trade around big round numbers"
+readme = "README.md"
+authors = [
+    { name = "robg", email = "17162939+rg-2@users.noreply.github.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.4.2",
+    "oandapyv20>=0.7.2",
+    "pydantic-settings>=2",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
+    "six>=1.17.0",
+]
+
+[project.scripts]
+brn = "brn_fun.cli:cli"
+
+[build-system]
+requires = ["uv_build>=0.9.30,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.20",
+]

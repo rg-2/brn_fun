@@ -1,0 +1,25 @@
+# brn_fun configuration
+#
+# Currency pairs to track. Use Oanda's underscore-separated instrument names
+# (e.g. EUR_USD, GBP_JPY). See:
+# https://developer.oanda.com/rest-live-v20/instrument-ep/
+instruments:
+  - EUR_USD
+  - GBP_USD
+  - USD_JPY
+  - AUD_USD
+  - USD_CAD
+  - EUR_JPY
+  - GBP_JPY
+
+# Default candle granularity. M15 = 15-minute bars. Larger frames can be
+# resampled from these; if you want finer detail (M1, S5), download them on
+# demand for the windows you care about.
+default_granularity: M15
+
+# Local SQLite database path (relative to project root or absolute).
+db_path: data/brn_fun.sqlite
+
+# Oanda price component to store. "M" = midpoint, "B" = bid, "A" = ask.
+# Mid is enough for backtesting; add bid/ask later if we care about spread.
+price: M
