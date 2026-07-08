@@ -548,10 +548,92 @@ time. See `analysis/rolling_check.py` and `data/plots/portfolio_equity.pdf`.
   halves positive, the recent trend is a warning. Might be worth
   re-splitting at 2024 to check whether the strategy still works on
   "very recent" data.
-- **Concentration in 2016 and 2022 wins.** If those were regime-specific
+- ~~**Concentration in 2016 and 2022 wins.** If those were regime-specific
   (say, particular volatility environments), we should identify what
-  made those years work.
+  made those years work.~~ **Answered — see next section.**
 - **Per-trade expectancy is small (+1.85 avg).** After realistic spread
   costs (~1-1.5p per trade), the edge is much thinner. AUD_USD +5.10
   per trade is comfortable but the others (USD_CAD +1.59, EUR_JPY +1.02,
   GBP_USD +1.03) get badly eroded.
+
+## 2026-07-08 — What made the winner years special
+
+Yearly base-rate profile across all 7 pairs (see `analysis/year_profile.py`)
+showed 2016 and 2022 share a clear signature.
+
+### Year-by-year market character
+
+| Metric              | 2016  | 2017 | 2018 | 2019 | 2020 | 2021 | 2022  | 2023 | 2024 | 2025 |
+|---------------------|------:|-----:|-----:|-----:|-----:|-----:|------:|-----:|-----:|-----:|
+| Touches (all 7)     |  625  | 377  | 363  | 331  | 415  | 291  |  570  | 408  | 454  | 398  |
+| Median ATR (pips)   |  5.4  | 3.4  | 3.3  | 3.3  | 3.4  | 2.3  |  4.6  | 3.8  | 4.3  | 3.6  |
+| Approach range      | 36.7  | 23.2 | 20.9 | 22.2 | 23.1 | 15.4 | 29.9  | 24.0 | 28.1 | 22.9 |
+| Hit @10p / 2h       | 74%   |  67% |  65% |  60% |  69% |  54% |  74%  |  66% |  67% |  69% |
+| Median fav @2h      | 22p   | 14p  | 15p  | 13p  | 19p  | 11p  |  22p  | 15p  | 18p  | 16p  |
+
+Feature distributions (`wick_only` ~45-57%, `touch_rejection` ~10-16%,
+`close_away` ~47-57%, `trend` ~85-98% flat) are **stable** across all
+years — none of the candlestick / trend features differentiate winners
+from losers. What varies is **market volatility**.
+
+- 2016 and 2022 have the highest median ATR (5.4p, 4.6p) and the widest
+  approach ranges (37p, 30p).
+- Their hit rate at a 10p target within 2h is **74%** — 20 percentage points
+  above the 54% of 2021.
+- Their median max fav within 2h is **22p** — nearly double the 11-13p of
+  weak years 2019, 2021, 2026.
+
+**The strategy's edge is a volatility-regime effect**, not a
+candlestick-pattern effect. High-vol years produce ~2× the reactions.
+
+### Per-pair ATR-quartile analysis
+
+For each portfolio pair, grouped its trades by the ATR-at-touch quartile:
+
+| Pair      | Q1 (low vol) | Q2       | Q3       | Q4 (high vol) |
+|-----------|-------------:|---------:|---------:|--------------:|
+| **AUD_USD** | +2.60 exp  | +3.07    | +4.86    | **+9.92**     |
+| USD_CAD   | **+2.61**   | +2.20    | +1.82    | −0.28         |
+| EUR_JPY   | −0.37       | +0.18    | **+2.50** | +1.78        |
+| GBP_USD   | +0.60       | +0.46    | −0.51    | **+3.58**     |
+
+Preferences are **pair-specific and config-specific**:
+
+- **AUD_USD** (60p target / 30p stop / 24h): monotonically loves high
+  vol — Q4 is 4× the Q1 edge. Big targets need big moves.
+- **USD_CAD** (15p target / 20p stop / 4h): monotonically hates high
+  vol — Q4 actually loses. Tight thresholds get chopped by noise.
+- **EUR_JPY, GBP_USD**: mixed preferences with local dips.
+
+### ATR-filtered portfolio (in-sample fit — noted below)
+
+Applying the favorable bucket per pair:
+
+| Metric              | Unfiltered   | ATR-filtered |
+|---------------------|-------------:|-------------:|
+| Trades              | 2,293        | 1,344 (−41%) |
+| Per-trade expectancy| +1.85 pips  | **+2.50 pips (+35%)** |
+| Total pips (10y)    | +4,253       | +3,366 (−21%) |
+| H1 expectancy       | +2.79        | +3.10        |
+| H2 expectancy       | +2.02        | +2.00        |
+
+Both halves stay positive, per-trade edge lifts by 35%, but total P&L
+shrinks 21% (fewer trades). Straight-up **more selective, more edge, less volume** trade-off.
+
+### Caveat: data leakage
+
+The favorable ATR bucket per pair was chosen using the full 10y history
+we're testing on — this is in-sample fit. A real deployment would need
+a **rolling ATR percentile** computed from data available only before
+each trade decision. The finding that per-pair vol preferences exist
+is real; the specific per-trade edges are optimistic.
+
+### Practical implications
+
+1. **AUD_USD is a "high-vol strategy"** and should probably always be
+   active when volatility is elevated. Consider sizing it up.
+2. **USD_CAD is a "low-vol strategy"** — pause in high-vol regimes.
+3. **A rolling ATR-percentile filter per pair** would formalize this and
+   avoid the leakage above.
+4. **Global market volatility indicator** (e.g. sum of pair ATRs, VIX
+   proxy) might predict which config-set to run — dynamic switching.
