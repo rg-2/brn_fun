@@ -17,6 +17,7 @@ from .backtest import FILTERS, backtest_touches, summarize_trades, uses_confirma
 from .config import Granularity, load_config, load_secrets
 from .db import connect, count_candles, fetch_candles, latest_time, upsert_candles
 from .oanda import download_range, download_recent
+from .plot import plot_trades_pdf, sample_by_half
 
 
 @click.group()
@@ -601,6 +602,123 @@ def _export_trades(path: Path, trades: list, *, pip: float) -> None:
                 t.exit_time, t.exit_idx, f"{t.exit_price:.5f}", t.exit_reason,
                 f"{t.pnl_price / pip:+.1f}", t.hold_bars,
             ])
+
+
+@cli.command()
+@click.argument("instrument")
+@click.option("--granularity", "-g", type=str, default=None)
+@click.option("--tier", type=click.Choice(list(TIERS.keys())), default="figure",
+              show_default=True)
+@click.option("--grid", type=float, default=None)
+@click.option("--pip", type=float, default=0.0001, show_default=True)
+@click.option("--cooldown-bars", type=int, default=480, show_default=True)
+@click.option("--forward-bars", type=int, default=96, show_default=True)
+@click.option("--filter", "filter_name",
+              type=click.Choice(list(FILTERS.keys())),
+              default="wick+drift+away", show_default=True)
+@click.option("--entry", type=click.Choice(["touch", "confirm"]), default=None)
+@click.option("--target-pips", type=float, default=60.0, show_default=True)
+@click.option("--stop-pips",   type=float, default=30.0, show_default=True)
+@click.option("--target-atr", type=float, default=None)
+@click.option("--stop-atr", type=float, default=None)
+@click.option("--max-bars", type=int, default=96, show_default=True)
+@click.option("--path-ambiguity", type=click.Choice(["worst", "best"]),
+              default="worst", show_default=True)
+@click.option("--complete-only/--all", default=True, show_default=True)
+@click.option("--split", type=str, default="2021-01-01", show_default=True,
+              help="RFC-3339 date splitting trades into H1 / H2 sections.")
+@click.option("--n-h1", type=int, default=50, show_default=True,
+              help="Sample size from the pre-split half (evenly spaced).")
+@click.option("--n-h2", type=int, default=50, show_default=True,
+              help="Sample size from the post-split half (evenly spaced).")
+@click.option("--cols", type=int, default=4, show_default=True,
+              help="Grid columns per PDF page.")
+@click.option("--rows", type=int, default=3, show_default=True,
+              help="Grid rows per PDF page.")
+@click.option("--context-before", type=int, default=40, show_default=True,
+              help="Bars of pre-entry context shown per panel.")
+@click.option("--out", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="Output PDF path. Default: data/plots/<INSTRUMENT>.pdf")
+@click.pass_context
+def plot(
+    ctx: click.Context,
+    instrument: str,
+    granularity: str | None,
+    tier: str,
+    grid: float | None,
+    pip: float,
+    cooldown_bars: int,
+    forward_bars: int,
+    filter_name: str,
+    entry: str | None,
+    target_pips: float,
+    stop_pips: float,
+    target_atr: float | None,
+    stop_atr: float | None,
+    max_bars: int,
+    path_ambiguity: str,
+    complete_only: bool,
+    split: str,
+    n_h1: int,
+    n_h2: int,
+    cols: int,
+    rows: int,
+    context_before: int,
+    out: Path | None,
+) -> None:
+    """Render a multi-panel PDF of backtest trades, split H1 vs H2."""
+    cfg = ctx.obj["config"]
+    gran = granularity or cfg.default_granularity
+    grid_val = float(grid) if grid is not None else grid_for(tier)
+    if entry is None:
+        entry = "confirm" if uses_confirmation(filter_name) else "touch"
+    if out is None:
+        out = Path("data/plots") / f"{instrument}.pdf"
+
+    with connect(cfg.db_path) as conn:
+        bars = fetch_candles(
+            conn, instrument, gran, limit=None, order="asc",
+            complete_only=complete_only,
+        )
+    if not bars:
+        click.echo(f"No {gran} bars stored for {instrument}.")
+        return
+
+    events = list(analyze(
+        bars, grid=grid_val, cooldown_bars=cooldown_bars,
+        forward_bars=forward_bars, pip=pip,
+    ))
+    trades = backtest_touches(
+        bars, events,
+        pip=pip, filter_name=filter_name, entry=entry,  # type: ignore[arg-type]
+        target_pips=target_pips, stop_pips=stop_pips,
+        target_atr=target_atr, stop_atr=stop_atr,
+        max_bars=max_bars, path_ambiguity=path_ambiguity,  # type: ignore[arg-type]
+    )
+    if not trades:
+        click.echo("No trades produced — try a looser filter.")
+        return
+
+    halves = sample_by_half(trades, split, max(n_h1, n_h2))
+    # sample_by_half samples the same N from each half; enforce per-half caps.
+    keys = list(halves.keys())
+    halves[keys[0]] = halves[keys[0]][:n_h1]
+    halves[keys[1]] = halves[keys[1]][:n_h2]
+
+    title = (
+        f"{instrument} {gran}  filter={filter_name}  entry={entry}  "
+        f"target={target_pips:g}p  stop={stop_pips:g}p"
+    )
+    click.echo(f"{len(trades)} total trades  →  "
+               f"H1 sampled {len(halves[keys[0]])}, "
+               f"H2 sampled {len(halves[keys[1]])}")
+    click.echo(f"writing {out}")
+    plotted = plot_trades_pdf(
+        bars, halves, out,
+        pip=pip, cols=cols, rows=rows,
+        context_before=context_before, title_prefix=title,
+    )
+    click.echo(f"plotted {plotted} panels")
 
 
 def _iso_to_dt(s: str) -> datetime:
