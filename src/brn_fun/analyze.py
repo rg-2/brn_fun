@@ -30,6 +30,14 @@ from .db import Candle
 
 Direction = Literal["up", "down"]
 Outcome = Literal["bounce", "break", "both", "chop"]
+Shape = Literal[
+    "doji",           # body is <10% of total range — indecision
+    "hammer",         # long lower wick, small body, tiny upper wick — rejects downside
+    "shooting_star",  # long upper wick, small body, tiny lower wick — rejects upside
+    "bullish",        # close > open, no pin-shape
+    "bearish",        # close < open, no pin-shape
+    "neutral",        # close == open but not a doji shape (rare, zero-range bar)
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +77,24 @@ class Context:
     approach_change: float      # close_touch - close_N_bars_ago (signed price units)
     approach_range: float       # max(H) - min(L) over last N bars (price units)
     wick_only: bool             # True iff the level sits outside the bar's body
+    touch_shape: Shape          # candlestick classification of the touch bar
+    touch_rejection: bool       # True iff shape is a pin AGAINST the approach direction
+                                # (up-touch + shooting_star, or down-touch + hammer)
+
+
+@dataclass(frozen=True, slots=True)
+class Confirmation:
+    """Features from the *next* bar after the touch.
+
+    Requires waiting one bar to observe, so a strategy filtering on these
+    accepts one bar of latency (~15 min at M15). Kept separate from Context
+    to keep that trade-off explicit.
+    """
+
+    shape: Shape                # candlestick classification of bar touch+1
+    engulfing: bool             # engulfs the touch bar's body in the reversal direction
+    close_away: bool            # closed further from the level than the touch bar's close
+    present: bool               # False iff the touch was the last bar (no follow-up exists)
 
 
 def _round_levels_in(low: float, high: float, grid: float) -> list[float]:
@@ -250,6 +276,17 @@ def compute_context(
     body_high = max(touch_bar.open, touch_bar.close)
     wick_only = touch.level < body_low or touch.level > body_high
 
+    # --- Shape of the touch bar and whether it's a rejection candle for our
+    # direction. An "up" touch (approaching from below) is rejected by a
+    # shooting_star (long upper wick, price rejected downward). A "down" touch
+    # is rejected by a hammer. Dojis at the level count as rejection too —
+    # indecision after a directional approach often precedes the reversal.
+    touch_shape = _classify_shape(touch_bar)
+    if touch.direction == "up":
+        touch_rejection = touch_shape in ("shooting_star", "doji")
+    else:  # "down"
+        touch_rejection = touch_shape in ("hammer", "doji")
+
     return Context(
         atr=atr,
         hour_utc=hour_utc,
@@ -257,7 +294,91 @@ def compute_context(
         approach_change=approach_change,
         approach_range=approach_range,
         wick_only=wick_only,
+        touch_shape=touch_shape,
+        touch_rejection=touch_rejection,
     )
+
+
+def compute_confirmation(bars: Sequence[Candle], touch: Touch) -> Confirmation:
+    """Read the bar AFTER the touch and score it as a reversal confirmation.
+
+    Adds one bar of latency to any strategy that filters on this. If the touch
+    is the last bar (no next bar exists), returns a stub with ``present=False``.
+    """
+    next_i = touch.idx + 1
+    if next_i >= len(bars):
+        return Confirmation(
+            shape="neutral", engulfing=False, close_away=False, present=False,
+        )
+
+    prev_bar = bars[touch.idx]
+    next_bar = bars[next_i]
+    shape = _classify_shape(next_bar)
+
+    # Engulfing: next bar's body opposite-direction and fully covers prev body.
+    prev_body_lo = min(prev_bar.open, prev_bar.close)
+    prev_body_hi = max(prev_bar.open, prev_bar.close)
+    next_body_lo = min(next_bar.open, next_bar.close)
+    next_body_hi = max(next_bar.open, next_bar.close)
+    if touch.direction == "up":
+        # Want bearish engulfing (previous bullish, current bearish, engulfs).
+        engulfing = (
+            prev_bar.close >= prev_bar.open
+            and next_bar.close < next_bar.open
+            and next_body_lo <= prev_body_lo
+            and next_body_hi >= prev_body_hi
+        )
+        # Close-away: next bar closed further BELOW the level than the touch bar did.
+        close_away = next_bar.close < prev_bar.close
+    else:  # "down"
+        engulfing = (
+            prev_bar.close <= prev_bar.open
+            and next_bar.close > next_bar.open
+            and next_body_lo <= prev_body_lo
+            and next_body_hi >= prev_body_hi
+        )
+        close_away = next_bar.close > prev_bar.close
+
+    return Confirmation(
+        shape=shape, engulfing=engulfing, close_away=close_away, present=True,
+    )
+
+
+def _classify_shape(
+    bar: Candle,
+    *,
+    doji_body_ratio: float = 0.10,
+    pin_wick_body_mult: float = 2.0,
+) -> Shape:
+    """Bucket a candle into one of six shapes based on body/wick geometry.
+
+    Thresholds:
+      - ``doji_body_ratio``: max body/(H-L) to still call it a doji.
+      - ``pin_wick_body_mult``: how many times the body the long wick must be
+        to qualify as a pin (hammer / shooting_star).
+    """
+    total = bar.high - bar.low
+    if total <= 0:
+        return "neutral"  # degenerate zero-range bar
+
+    body = abs(bar.close - bar.open)
+    if body / total < doji_body_ratio:
+        return "doji"
+
+    upper_wick = bar.high - max(bar.open, bar.close)
+    lower_wick = min(bar.open, bar.close) - bar.low
+
+    # Pin bars: one wick long relative to body, the other wick short.
+    if lower_wick > pin_wick_body_mult * body and upper_wick < body:
+        return "hammer"
+    if upper_wick > pin_wick_body_mult * body and lower_wick < body:
+        return "shooting_star"
+
+    if bar.close > bar.open:
+        return "bullish"
+    if bar.close < bar.open:
+        return "bearish"
+    return "neutral"
 
 
 def _parse_touch_time(s: str) -> datetime:
@@ -284,12 +405,13 @@ def analyze(
     pip: float = 0.0001,
     atr_period: int = 14,
     approach_bars: int = 20,
-) -> Iterator[tuple[Touch, Context, Outcome_]]:
-    """Yield (touch, context, outcome) triples — everything for one event."""
+) -> Iterator[tuple[Touch, Context, Confirmation, Outcome_]]:
+    """Yield (touch, context, confirmation, outcome) for every event."""
     for touch in find_first_touches(bars, grid=grid, cooldown_bars=cooldown_bars):
         context = compute_context(
             bars, touch, atr_period=atr_period, approach_bars=approach_bars,
         )
+        confirmation = compute_confirmation(bars, touch)
         outcome = characterize_touch(
             bars, touch,
             forward_bars=forward_bars,
@@ -297,7 +419,7 @@ def analyze(
             break_pips=break_pips,
             pip=pip,
         )
-        yield touch, context, outcome
+        yield touch, context, confirmation, outcome
 
 
 # --- Tier helper for the CLI --------------------------------------------------
@@ -317,14 +439,14 @@ def grid_for(tier_or_number: str | float) -> float:
 
 
 def summarize_outcomes(
-    events: Iterable[tuple[Touch, Context, Outcome_]],
+    events: Iterable[tuple[Touch, Context, Confirmation, Outcome_]],
 ) -> dict[str, int | float]:
-    """Roll up an iterable of (touch, context, outcome) triples."""
+    """Roll up an iterable of (touch, context, confirmation, outcome) tuples."""
     n = 0
     tags = {"bounce": 0, "break": 0, "both": 0, "chop": 0}
     fav_sum = 0.0
     adv_sum = 0.0
-    for _t, _c, o in events:
+    for _t, _c, _cf, o in events:
         n += 1
         tags[o.tag] += 1
         fav_sum += o.favorable

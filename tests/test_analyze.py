@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from brn_fun.analyze import (
+    _classify_shape,
     _round_levels_in,
     analyze,
     characterize_touch,
+    compute_confirmation,
     compute_context,
     find_first_touches,
 )
@@ -180,22 +182,23 @@ def test_chop_when_flat() -> None:
     assert outcome.tag == "chop"
 
 
-def test_analyze_iterates_triples() -> None:
-    """The convenience `analyze` iterator returns (touch, context, outcome)."""
+def test_analyze_iterates_quadruples() -> None:
+    """`analyze` yields (touch, context, confirmation, outcome) tuples."""
     bars = [
         _c("2024-01-02T09:00:00.000000000Z", 1.09, 1.095, close=1.094),
         _c("2024-01-02T09:15:00.000000000Z", 1.099, 1.101, close=1.100, open_=1.0995),
         _c("2024-01-02T09:30:00.000000000Z", 1.093, 1.099, close=1.094),
     ]
-    triples = list(analyze(bars, grid=0.01, cooldown_bars=100, forward_bars=5))
-    assert len(triples) == 1
-    t, c, o = triples[0]
+    events = list(analyze(bars, grid=0.01, cooldown_bars=100, forward_bars=5))
+    assert len(events) == 1
+    t, c, cf, o = events[0]
     assert t.level == 1.10
     assert o.tag == "bounce"
-    # Context has been populated with real values.
+    # Context / Confirmation have been populated.
     assert c.hour_utc == 9
     assert c.dow == 1  # Tuesday
     assert c.atr > 0
+    assert cf.present is True  # a next bar existed
 
 
 # --- compute_context ---------------------------------------------------------
@@ -255,3 +258,106 @@ def test_context_approach_change_signed() -> None:
     # Close moved from 1.092 → 1.100 over the 3-bar approach window: +80 pips.
     assert ctx.approach_change > 0
     assert abs(ctx.approach_change - 0.008) < 1e-6
+
+
+# --- _classify_shape --------------------------------------------------------
+
+def _bar(o: float, h: float, lo: float, c: float) -> Candle:
+    """Explicit-OHLC candle for shape tests."""
+    return Candle(
+        instrument="X", granularity="M15", time="t",
+        open=o, high=h, low=lo, close=c,
+        volume=100, complete=True,
+    )
+
+
+def test_classify_shape_doji() -> None:
+    # Small body relative to full range: 0.0001 / 0.0020 = 5% < 10%.
+    assert _classify_shape(_bar(1.1000, 1.1010, 1.0990, 1.1001)) == "doji"
+
+
+def test_classify_shape_hammer() -> None:
+    # Long lower wick, small body up near the top: open/close both near high.
+    # Body = 0.0002; lower wick = 0.0015; upper wick = 0.0001. Lower / body = 7.5 > 2.
+    assert _classify_shape(_bar(1.1010, 1.1013, 1.0995, 1.1012)) == "hammer"
+
+
+def test_classify_shape_shooting_star() -> None:
+    # Long upper wick, small (but non-doji) body near low.
+    # Body = 3p / 20p total = 15% > 10% doji cutoff; upper_wick / body = 5.3 > 2.
+    assert _classify_shape(_bar(1.1002, 1.1020, 1.1000, 1.1005)) == "shooting_star"
+
+
+def test_classify_shape_bullish_bearish() -> None:
+    # Ordinary directional candles with proportionate wicks.
+    assert _classify_shape(_bar(1.1000, 1.1015, 1.0998, 1.1012)) == "bullish"
+    assert _classify_shape(_bar(1.1012, 1.1015, 1.0998, 1.1000)) == "bearish"
+
+
+# --- touch_rejection -------------------------------------------------------
+
+def test_touch_rejection_up_shooting_star() -> None:
+    """Up-touch with a shooting_star at the level is a rejection."""
+    bars = [
+        _c("2024-01-02T00:00:00.000000000Z", 1.093, 1.095, close=1.094),
+        # Body near 1.099-1.100, upper wick reaches 1.101 (touches 1.10), tiny lower wick.
+        Candle("X", "M15", "2024-01-02T00:15:00.000000000Z",
+               open=1.0985, high=1.1010, low=1.0983, close=1.0990,
+               volume=1, complete=True),
+    ]
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
+    assert len(touches) == 1 and touches[0].direction == "up"
+    ctx = compute_context(bars, touches[0])
+    assert ctx.touch_shape == "shooting_star"
+    assert ctx.touch_rejection is True
+
+
+def test_touch_rejection_down_hammer() -> None:
+    """Down-touch with a hammer at the level is a rejection."""
+    bars = [
+        _c("2024-01-02T00:00:00.000000000Z", 1.105, 1.107, close=1.106),
+        # Body near 1.1010-1.1015, lower wick reaches 1.0999 (touches 1.10), tiny upper.
+        Candle("X", "M15", "2024-01-02T00:15:00.000000000Z",
+               open=1.1015, high=1.1017, low=1.0999, close=1.1012,
+               volume=1, complete=True),
+    ]
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
+    assert len(touches) == 1 and touches[0].direction == "down"
+    ctx = compute_context(bars, touches[0])
+    assert ctx.touch_shape == "hammer"
+    assert ctx.touch_rejection is True
+
+
+# --- compute_confirmation --------------------------------------------------
+
+def test_confirmation_bearish_engulfing_after_up_touch() -> None:
+    """Up-touch, next bar is a bearish engulfing → engulfing=True."""
+    bars = [
+        _c("2024-01-02T00:00:00.000000000Z", 1.093, 1.095, close=1.094),
+        # Touch bar: small bullish body just under the level, wick to 1.1001.
+        Candle("X", "M15", "2024-01-02T00:15:00.000000000Z",
+               open=1.0994, high=1.1001, low=1.0993, close=1.0998,
+               volume=1, complete=True),
+        # Next bar: bearish body that engulfs the prior body (open>=1.0998, close<=1.0994).
+        Candle("X", "M15", "2024-01-02T00:30:00.000000000Z",
+               open=1.1000, high=1.1002, low=1.0980, close=1.0990,
+               volume=1, complete=True),
+    ]
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
+    assert len(touches) == 1
+    cf = compute_confirmation(bars, touches[0])
+    assert cf.present is True
+    assert cf.shape == "bearish"
+    assert cf.engulfing is True
+    assert cf.close_away is True  # closed 1.0990, further below level than 1.0998
+
+
+def test_confirmation_absent_at_tail() -> None:
+    """If the touch is the last bar, confirmation reports present=False."""
+    bars = [
+        _c("2024-01-02T00:00:00.000000000Z", 1.093, 1.095, close=1.094),
+        _c("2024-01-02T00:15:00.000000000Z", 1.099, 1.101, close=1.100),
+    ]
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
+    cf = compute_confirmation(bars, touches[0])
+    assert cf.present is False

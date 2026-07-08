@@ -318,31 +318,60 @@ def touches(
 
     if events:
         click.echo("")
-        # Wick vs body is single-char to keep the table narrow (W = wick-only).
+        # Compact shape codes so the table stays readable:
+        #   D doji, H hammer, S shooting_star, + bullish, - bearish, . neutral
         click.echo(
             f"{'time':<30}  {'level':>7}  {'dir':<4}  "
-            f"{'atr':>5}  {'appr':>6}  wb  "
+            f"{'atr':>5}  {'appr':>6}  wb  ts  cs  cf  "
             f"{'fav':>6}  {'adv':>6}  {'outcome':<7}"
         )
-        for t, c, o in events[-head:]:
+        for t, c, cf, o in events[-head:]:
             wb = "W" if c.wick_only else "b"
+            ts = _shape_code(c.touch_shape)
+            cs = _shape_code(cf.shape) if cf.present else " "
+            # Confirmation flag: E engulfing + close-away, e engulfing only,
+            # a close-away only, · nothing. If confirm bar isn't present, blank.
+            if not cf.present:
+                cflag = " "
+            elif cf.engulfing and cf.close_away:
+                cflag = "E"
+            elif cf.engulfing:
+                cflag = "e"
+            elif cf.close_away:
+                cflag = "a"
+            else:
+                cflag = "·"
             click.echo(
                 f"{t.time:<30}  {t.level:>7.4f}  {t.direction:<4}  "
                 f"{c.atr / pip:>5.1f}  {c.approach_change / pip:>+6.1f}  {wb}   "
+                f"{ts}   {cs}   {cflag}   "
                 f"{o.favorable / pip:>6.1f}  {o.adverse / pip:>6.1f}  {o.tag:<7}"
             )
         click.echo(f"(showing last {min(head, len(events))} of {len(events)})")
-        click.echo("legend: atr=14-bar ATR pips, appr=close change over 20 bars, "
-                   "wb=W wick-only / b body-touch")
+        click.echo(
+            "legend: wb=Wick/body   ts=touch shape   cs=confirm shape   "
+            "cf=E(ngulfing+away)/e(ngulf)/a(way)/·(none)   "
+            "D doji H hammer S shooting_star + bull - bear . neutral"
+        )
 
     if export is not None:
         _export_touches(export, events, pip=pip)
         click.echo(f"\nwrote {len(events)} rows to {export}")
 
 
+_SHAPE_CODES = {
+    "doji": "D", "hammer": "H", "shooting_star": "S",
+    "bullish": "+", "bearish": "-", "neutral": ".",
+}
+
+
+def _shape_code(shape: str) -> str:
+    return _SHAPE_CODES.get(shape, "?")
+
+
 def _export_touches(
     path: Path,
-    events: list,  # list[tuple[Touch, Context, Outcome_]]
+    events: list,  # list[tuple[Touch, Context, Confirmation, Outcome_]]
     *,
     pip: float,
 ) -> None:
@@ -356,15 +385,19 @@ def _export_touches(
             "time", "bar_idx", "level", "direction", "cooldown_bars",
             "atr_pips", "hour_utc", "dow",
             "approach_change_pips", "approach_range_pips", "wick_only",
+            "touch_shape", "touch_rejection",
+            "confirm_present", "confirm_shape", "confirm_engulfing", "confirm_close_away",
             "favorable_pips", "adverse_pips", "close_after", "close_dist_pips",
             "window_bars", "outcome",
         ])
-        for t, c, o in events:
+        for t, c, cf, o in events:
             w.writerow([
                 t.time, t.idx, f"{t.level:.5f}", t.direction, t.cooldown_bars,
                 f"{c.atr / pip:.1f}", c.hour_utc, c.dow,
                 f"{c.approach_change / pip:+.1f}", f"{c.approach_range / pip:.1f}",
                 int(c.wick_only),
+                c.touch_shape, int(c.touch_rejection),
+                int(cf.present), cf.shape, int(cf.engulfing), int(cf.close_away),
                 f"{o.favorable / pip:.1f}", f"{o.adverse / pip:.1f}",
                 f"{o.close_after:.5f}", f"{o.close_dist / pip:.1f}",
                 o.window_bars, o.tag,
