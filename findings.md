@@ -150,3 +150,67 @@ dependency (which one hits first) then matters.
 - They do **not** change our confidence in the previous edge findings —
   those were already about the events, not the thresholds.
 - Next real step to evaluate the filter is a backtester.
+
+## 2026-07-07 — Backtester reality check
+
+Built a bar-by-bar target/stop simulator. Applied to our best cross-pair
+filter (`wick + not-sprint + close_away`) with defaults 60p target,
+30p stop, entry at close of the confirmation bar, max_bars=96 (24h),
+worst-case path assumption.
+
+### Descriptive edge did NOT translate directly to strategy P&L
+
+| Pair | Descriptive edge | Backtest expectancy (60/30) |
+|---|---:|---:|
+| EUR_USD | +15 | −0.6 |
+| GBP_USD | +32 | +7.1 |
+| AUD_USD | +34 | +9.9 |
+| USD_CAD | +14 | −1.5 |
+| USD_JPY | +41 | −0.4 |
+| EUR_JPY | +26 | −2.5 |
+| GBP_JPY | −5 | −4.0 |
+
+Only 2/7 pairs profitable at the default 60/30. Path dependency + worst-case
+ambiguity assumption cost us most of the theoretical edge — the descriptive
+metric was measuring max excursion in the 24h window, not what you actually
+capture with fixed target/stop rules.
+
+### Config sweep across pairs
+
+| Config (wick+drift+away filter, path=worst) | Pairs profitable | Agg expect | Total pips |
+|---|:-:|---:|---:|
+| 60/30 (default) | 2/7 | +0.39 | +129 |
+| 60/30 best-case ambiguity | 2/7 | +0.66 | +219 |
+| 30/30 (1:1 R:R) | 4/7 | +1.66 | +552 |
+| **90/30 (3:1 R:R)** | **5/7** | **+2.54** | **+847** |
+| 60/15 (4:1 R:R) | 2/7 | +0.11 | +37 |
+| 3×ATR / 1.5×ATR | 4/7 | +0.41 | +137 |
+| 2×ATR / 1×ATR | 4/7 | +0.91 | +303 |
+| wick-only, 60/30 | 4/7 | +0.31 | +358 |
+
+### Current best: 90p target / 30p stop with wick+drift+away
+
+- 5/7 pairs profitable, ~67 trades/year, +2.54 pips/trade expectancy
+- +847 pips total over 5 years, all 7 pairs combined
+- Losers: USD_CAD (−5.2), GBP_JPY (−1.8) — both mild
+- USD_CAD dislikes the filter at any target/stop tried; pair-specific issue.
+- GBP_JPY improves under **30/30** (+2.3) — high volatility wants tighter targets.
+
+### Non-obvious takeaways
+
+- Best-case ambiguity barely helps (+0.66 vs +0.39). Path assumption isn't the bottleneck.
+- 4:1 R:R (60/15) is actively bad — too many stopouts.
+- Wider targets (90p) with same 30p stop = decisive winner.
+- Pure `wick-only` filter fires 3.5× more trades at similar per-trade expectancy — bigger total (+358) but looser risk.
+- **No single config is best for all pairs.** GBP_JPY wants tight targets; USD_CAD wants a different filter (or exclusion).
+
+### Open questions
+
+- Per-pair custom target/stop (or ATR-scaled with pair-specific multipliers) —
+  is there a global rule that works for all, or do we accept pair-tailoring?
+- Realistic **spread** and **slippage** costs — none included yet. Would eat ~1p per trade in a major.
+- Time-in-market: 90/30 win trades hold much longer than losses. That skews
+  the equity-curve dynamics.
+- One-position-at-a-time vs overlapping: currently all events trade.
+- Trend / session / hour filters within the winning combo — do they help further?
+- Out-of-sample time slices (H1 vs H2 on the strategy P&L, not just edge).
