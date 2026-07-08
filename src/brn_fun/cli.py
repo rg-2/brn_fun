@@ -255,6 +255,12 @@ def show(
               help="Bars used for ATR at time of touch.")
 @click.option("--approach-bars", type=int, default=20, show_default=True,
               help="Bars used for approach-change / approach-range features.")
+@click.option("--sma-period", type=int, default=1920, show_default=True,
+              help="Bars for the trend SMA (default 1920 M15 = 20 days).")
+@click.option("--slope-lookback", type=int, default=480, show_default=True,
+              help="Bars back for SMA slope (default 480 M15 = 5 days).")
+@click.option("--trend-flat-pips", type=float, default=50.0, show_default=True,
+              help="|SMA slope| below this many pips is 'flat', else up/down.")
 @click.pass_context
 def touches(
     ctx: click.Context,
@@ -272,6 +278,9 @@ def touches(
     head: int,
     atr_period: int,
     approach_bars: int,
+    sma_period: int,
+    slope_lookback: int,
+    trend_flat_pips: float,
 ) -> None:
     """Find round-number 'first-touch-in-a-while' events and tag outcomes."""
     cfg = ctx.obj["config"]
@@ -293,6 +302,8 @@ def touches(
         grid=grid_val, cooldown_bars=cooldown_bars, forward_bars=forward_bars,
         bounce_pips=bounce_pips, break_pips=break_pips, pip=pip,
         atr_period=atr_period, approach_bars=approach_bars,
+        sma_period=sma_period, slope_lookback=slope_lookback,
+        trend_flat_pips=trend_flat_pips,
     ))
 
     summary = summarize_outcomes(iter(events))
@@ -320,9 +331,12 @@ def touches(
         click.echo("")
         # Compact shape codes so the table stays readable:
         #   D doji, H hammer, S shooting_star, + bullish, - bearish, . neutral
+        # Trend/alignment codes:
+        #   trend: U up, D down, ~ flat
+        #   align: W with, A against, · flat
         click.echo(
             f"{'time':<30}  {'level':>7}  {'dir':<4}  "
-            f"{'atr':>5}  {'appr':>6}  wb  ts  cs  cf  "
+            f"{'atr':>5}  {'appr':>6}  wb  ts  cs  cf  tr  al  "
             f"{'fav':>6}  {'adv':>6}  {'outcome':<7}"
         )
         for t, c, cf, o in events[-head:]:
@@ -341,16 +355,19 @@ def touches(
                 cflag = "a"
             else:
                 cflag = "·"
+            trend_code = {"up": "U", "down": "D", "flat": "~"}[c.trend]
+            align_code = {"with": "W", "against": "A", "flat": "·"}[c.trend_alignment]
             click.echo(
                 f"{t.time:<30}  {t.level:>7.4f}  {t.direction:<4}  "
                 f"{c.atr / pip:>5.1f}  {c.approach_change / pip:>+6.1f}  {wb}   "
-                f"{ts}   {cs}   {cflag}   "
+                f"{ts}   {cs}   {cflag}   {trend_code}   {align_code}   "
                 f"{o.favorable / pip:>6.1f}  {o.adverse / pip:>6.1f}  {o.tag:<7}"
             )
         click.echo(f"(showing last {min(head, len(events))} of {len(events)})")
         click.echo(
             "legend: wb=Wick/body   ts=touch shape   cs=confirm shape   "
             "cf=E(ngulfing+away)/e(ngulf)/a(way)/·(none)   "
+            "tr=U up / D down / ~ flat   al=W with / A against / · flat   "
             "D doji H hammer S shooting_star + bull - bear . neutral"
         )
 
@@ -387,6 +404,7 @@ def _export_touches(
             "approach_change_pips", "approach_range_pips", "wick_only",
             "touch_shape", "touch_rejection",
             "confirm_present", "confirm_shape", "confirm_engulfing", "confirm_close_away",
+            "sma_20d", "sma_slope_pips", "trend", "trend_alignment",
             "favorable_pips", "adverse_pips", "close_after", "close_dist_pips",
             "window_bars", "outcome",
         ])
@@ -398,6 +416,8 @@ def _export_touches(
                 int(c.wick_only),
                 c.touch_shape, int(c.touch_rejection),
                 int(cf.present), cf.shape, int(cf.engulfing), int(cf.close_away),
+                f"{c.sma_20d:.5f}", f"{c.sma_slope / pip:+.1f}",
+                c.trend, c.trend_alignment,
                 f"{o.favorable / pip:.1f}", f"{o.adverse / pip:.1f}",
                 f"{o.close_after:.5f}", f"{o.close_dist / pip:.1f}",
                 o.window_bars, o.tag,

@@ -361,3 +361,57 @@ def test_confirmation_absent_at_tail() -> None:
     touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
     cf = compute_confirmation(bars, touches[0])
     assert cf.present is False
+
+
+# --- trend / trend_alignment ------------------------------------------------
+
+def _ts(k: int) -> str:
+    """Advancing timestamp so hour/dow features stay well-formed."""
+    return f"2024-01-01T{(k // 60) % 24:02d}:{(k % 60):02d}:00.000000000Z"
+
+
+def test_trend_up_with_alignment() -> None:
+    """A steady rise → trend=up; an up-touch of a round level → alignment=with."""
+    # 2000 rising bars with closes climbing from 1.051 → 1.059. Bar ranges are
+    # tiny (±0.5p), so no round level (1.05 or 1.06) is touched during the
+    # ramp. Then a final bar punches through 1.06 from below.
+    n = 2000
+    lo, hi = 1.051, 1.059
+    bars = []
+    for k in range(n):
+        c = lo + (hi - lo) * k / (n - 1)
+        bars.append(_c(_ts(k), c - 0.00005, c + 0.00005, close=c))
+    bars.append(_c(_ts(n), 1.0599, 1.0601, close=1.0600))
+
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=200))
+    assert len(touches) == 1 and touches[0].direction == "up"
+
+    ctx = compute_context(
+        bars, touches[0],
+        sma_period=500, slope_lookback=200, trend_flat_pips=5.0,
+    )
+    assert ctx.trend == "up"
+    assert ctx.trend_alignment == "with"  # up-touch + up-trend
+    assert ctx.sma_slope > 0
+
+
+def test_trend_flat_alignment() -> None:
+    """A sideways series → trend=flat regardless of touch direction."""
+    # 2000 bars alternating tightly around 1.0502 (ranges 1.05015–1.05025 —
+    # inside (1.05, 1.06), so no round level fires during priming). Then a
+    # final bar drops to touch 1.05 from above.
+    bars = []
+    for k in range(2000):
+        c = 1.0502 + ((-1) ** k) * 0.00005
+        bars.append(_c(_ts(k), c - 0.00005, c + 0.00005, close=c))
+    bars.append(_c(_ts(2000), 1.0499, 1.0501, close=1.0500))
+
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=200))
+    assert len(touches) == 1 and touches[0].direction == "down"
+
+    ctx = compute_context(
+        bars, touches[0],
+        sma_period=500, slope_lookback=200, trend_flat_pips=10.0,
+    )
+    assert ctx.trend == "flat"
+    assert ctx.trend_alignment == "flat"

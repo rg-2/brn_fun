@@ -38,6 +38,8 @@ Shape = Literal[
     "bearish",        # close < open, no pin-shape
     "neutral",        # close == open but not a doji shape (rare, zero-range bar)
 ]
+Trend = Literal["up", "down", "flat"]
+Alignment = Literal["with", "against", "flat"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +82,10 @@ class Context:
     touch_shape: Shape          # candlestick classification of the touch bar
     touch_rejection: bool       # True iff shape is a pin AGAINST the approach direction
                                 # (up-touch + shooting_star, or down-touch + hammer)
+    sma_20d: float              # 20-day rolling mean of close at time of touch (price units)
+    sma_slope: float            # signed change of sma_20d over `slope_lookback` bars (price units)
+    trend: Trend                # up / down / flat based on sma_slope vs threshold
+    trend_alignment: Alignment  # touch direction vs trend: with / against / flat
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +237,11 @@ def compute_context(
     *,
     atr_period: int = 14,
     approach_bars: int = 20,
+    sma_period: int = 1920,          # 20 trading days at M15
+    slope_lookback: int = 480,       # 5 trading days at M15
+    trend_flat_pips: float = 50.0,
+    pip: float = 0.0001,
+    sma_series: Sequence[float] | None = None,
 ) -> Context:
     """Compute backward-looking features at the moment of the touch.
 
@@ -287,6 +298,37 @@ def compute_context(
     else:  # "down"
         touch_rejection = touch_shape in ("hammer", "doji")
 
+    # --- Higher-timeframe trend. Prefer the precomputed rolling-mean series
+    # (analyze() builds one per bars sequence); fall back to computing here
+    # if compute_context is called directly.
+    if sma_series is None:
+        sma_series = _rolling_mean_close(bars, sma_period)
+    sma_now = sma_series[i]
+    if i >= slope_lookback:
+        sma_lag = sma_series[i - slope_lookback]
+        sma_slope = sma_now - sma_lag
+    else:
+        sma_slope = 0.0
+
+    flat_thresh = trend_flat_pips * pip
+    if sma_slope > flat_thresh:
+        trend: Trend = "up"
+    elif sma_slope < -flat_thresh:
+        trend = "down"
+    else:
+        trend = "flat"
+
+    if trend == "flat":
+        alignment: Alignment = "flat"
+    elif (
+        (touch.direction == "up" and trend == "up")
+        or (touch.direction == "down" and trend == "down")
+    ):
+        # Touch direction matches the prevailing trend — "with-trend" test.
+        alignment = "with"
+    else:
+        alignment = "against"
+
     return Context(
         atr=atr,
         hour_utc=hour_utc,
@@ -296,7 +338,33 @@ def compute_context(
         wick_only=wick_only,
         touch_shape=touch_shape,
         touch_rejection=touch_rejection,
+        sma_20d=sma_now,
+        sma_slope=sma_slope,
+        trend=trend,
+        trend_alignment=alignment,
     )
+
+
+def _rolling_mean_close(bars: Sequence[Candle], period: int) -> list[float]:
+    """Rolling mean of close over ``period`` bars ending at each index.
+
+    For indices with fewer than ``period`` bars of history, returns the mean of
+    whatever's available (never NaN) — this keeps early touches usable at the
+    cost of a slightly less-stable estimate near the start of the series.
+    """
+    if period <= 0:
+        raise ValueError("period must be > 0")
+    n = len(bars)
+    out = [0.0] * n
+    running = 0.0
+    for i in range(n):
+        running += bars[i].close
+        if i >= period:
+            running -= bars[i - period].close
+            out[i] = running / period
+        else:
+            out[i] = running / (i + 1)  # partial window near the start
+    return out
 
 
 def compute_confirmation(bars: Sequence[Candle], touch: Touch) -> Confirmation:
@@ -405,11 +473,20 @@ def analyze(
     pip: float = 0.0001,
     atr_period: int = 14,
     approach_bars: int = 20,
+    sma_period: int = 1920,
+    slope_lookback: int = 480,
+    trend_flat_pips: float = 50.0,
 ) -> Iterator[tuple[Touch, Context, Confirmation, Outcome_]]:
     """Yield (touch, context, confirmation, outcome) for every event."""
+    # Precompute the SMA once so per-touch context is O(1) in the SMA lookup.
+    sma_series = _rolling_mean_close(bars, sma_period)
     for touch in find_first_touches(bars, grid=grid, cooldown_bars=cooldown_bars):
         context = compute_context(
-            bars, touch, atr_period=atr_period, approach_bars=approach_bars,
+            bars, touch,
+            atr_period=atr_period, approach_bars=approach_bars,
+            sma_period=sma_period, slope_lookback=slope_lookback,
+            trend_flat_pips=trend_flat_pips, pip=pip,
+            sma_series=sma_series,
         )
         confirmation = compute_confirmation(bars, touch)
         outcome = characterize_touch(
