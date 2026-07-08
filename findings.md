@@ -58,7 +58,53 @@ Running log of what the touch analyzer has revealed. Add sections chronologicall
 
 ### Open questions / next work
 
-- Are these filters stable across time (e.g. does 2021–2023 look like 2024–2026)? See task #18 (parameter sweep) and time-slicing.
+- ~~Are these filters stable across time (e.g. does 2021–2023 look like 2024–2026)?~~ **Answered below in the time-stability sweep.**
 - Does the edge survive with realistic entry, stop, and target rules (task: backtester skeleton)?
 - What if we tune bounce/break thresholds per pair (e.g. use ATR-scaled thresholds instead of fixed 30 pips)?
 - Add candlestick pattern detection for **bar N+2** (a second confirmation).
+- A rolling-year edge chart would be more rigorous than a single midpoint split.
+
+## 2026-07-07 — Time-stability sweep
+
+Split each pair's touches at **2024-01-01** (calendar midpoint of the 5y window). Compute edges per half.
+
+### Individual signals
+
+- **`wick_only`** — same-sign positive in both halves for 6/7 pairs. Only GBP_JPY flipped (−10 → +14). Robust.
+- **`confirm_close_away`** — same-sign positive in both halves for 6/7. Only GBP_USD flipped (−4 → +5, marginal). Robust.
+- **`touch_rejection`** — 4/7 flipped signs, but per-half n=6–36. Noise-dominated at these sample sizes; only trust it inside combined filters.
+- **Baseline** — 4/7 flipped signs. Confirms that unfiltered "touch every level" is coin-flip.
+
+### Combined filter (wick + not-sprint + close_away)
+
+| Pair | H1 edge | H2 edge | Note |
+|---|---:|---:|---|
+| EUR_USD | +27 | +9 | positive, decayed |
+| GBP_USD | +54 | +4 | positive, big decay |
+| AUD_USD | +41 | +29 | strong both halves |
+| USD_CAD | +20 | +4 | positive, decayed |
+| USD_JPY | +23 | **+63** | strong; better recently |
+| EUR_JPY | +4 | **+51** | weak H1, strong H2 |
+| GBP_JPY | **−39** | **+38** | **FLIPPED** |
+
+- **Aggregate H1: n=173, bounce 42%, edge +14. H2: n=160, bounce 47%, edge +30.** Both halves positive; H2 is stronger.
+- **6/7 pairs same-sign positive** in both halves. Only GBP_JPY flipped.
+
+### Regime observation
+
+- All USD-quoted pairs (EUR_USD, GBP_USD, USD_CAD) show **H2 edge < H1 edge** (decay).
+- All JPY-quoted pairs (USD_JPY, EUR_JPY, GBP_JPY) show **H2 edge > H1 edge** (strengthening).
+
+Plausible macro trigger: **BoJ policy normalization began March 2024** after decades of near-zero rates. JPY pairs took on more directional character afterward — bigger H2 sample sizes with cleaner rejections at round levels. The GBP_JPY H1→H2 flip is the extreme case.
+
+### Verdict
+
+- The **wick_only + close_away** core is a time-stable pattern, not a curve-fit artifact.
+- Individual pair edges drift with regime — expected.
+- Confidence to build a backtester on top of these signals is warranted.
+
+### Open questions
+
+- Rolling-year edge over the 5y window would be more granular than a single midpoint split — worth doing next.
+- If backfilled to 10y we could split into 4 quarters and see how deep the stability goes.
+- GBP_JPY's flip demands a pair-specific explanation before including it in any live strategy.
