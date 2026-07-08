@@ -18,6 +18,12 @@ from .config import Granularity, load_config, load_secrets
 from .db import connect, count_candles, fetch_candles, latest_time, upsert_candles
 from .oanda import download_range, download_recent
 from .plot import plot_trades_pdf, sample_by_half
+from .reaction import (
+    adverse_percentiles,
+    compute_reactions,
+    favorable_percentiles,
+    target_stats,
+)
 
 
 @click.group()
@@ -719,6 +725,131 @@ def plot(
         context_before=context_before, title_prefix=title,
     )
     click.echo(f"plotted {plotted} panels")
+
+
+@cli.command()
+@click.argument("instrument")
+@click.option("--granularity", "-g", type=str, default=None)
+@click.option("--tier", type=click.Choice(list(TIERS.keys())), default="figure",
+              show_default=True)
+@click.option("--grid", type=float, default=None)
+@click.option("--pip", type=float, default=0.0001, show_default=True)
+@click.option("--cooldown-bars", type=int, default=480, show_default=True)
+@click.option("--forward-bars", type=int, default=32, show_default=True,
+              help="How many bars past entry to record reaction over (32 M15 = 8h).")
+@click.option("--filter", "filter_name",
+              type=click.Choice(list(FILTERS.keys())),
+              default="all", show_default=True,
+              help="Only include events passing this filter. 'all' = raw base rates.")
+@click.option("--entry", type=click.Choice(["touch", "confirm"]), default=None)
+@click.option("--windows", default="2,4,8,16,32", show_default=True,
+              help="Comma-separated bar counts for time-bucket stats.")
+@click.option("--targets", default="10,15,20,25,30", show_default=True,
+              help="Comma-separated target sizes (pips) for hit-rate table.")
+@click.option("--split", type=str, default=None,
+              help="If set, run separately on events before/after this date.")
+@click.option("--complete-only/--all", "complete_only",
+              default=True, show_default=True)
+@click.pass_context
+def reaction(
+    ctx: click.Context,
+    instrument: str,
+    granularity: str | None,
+    tier: str,
+    grid: float | None,
+    pip: float,
+    cooldown_bars: int,
+    forward_bars: int,
+    filter_name: str,
+    entry: str | None,
+    windows: str,
+    targets: str,
+    split: str | None,
+    complete_only: bool,
+) -> None:
+    """Per-pair reaction study: how fast/deep the level bounce develops."""
+    cfg = ctx.obj["config"]
+    gran = granularity or cfg.default_granularity
+    grid_val = float(grid) if grid is not None else grid_for(tier)
+    if entry is None:
+        entry = "confirm" if uses_confirmation(filter_name) else "touch"
+
+    window_bars = [int(w) for w in windows.split(",") if w]
+    target_pips = [float(t) for t in targets.split(",") if t]
+
+    with connect(cfg.db_path) as conn:
+        bars = fetch_candles(
+            conn, instrument, gran, limit=None, order="asc",
+            complete_only=complete_only,
+        )
+    if not bars:
+        click.echo(f"No {gran} bars stored for {instrument}.")
+        return
+
+    events = list(analyze(
+        bars, grid=grid_val, cooldown_bars=cooldown_bars,
+        forward_bars=forward_bars, pip=pip,
+    ))
+    # Apply named filter — reuse the backtester's filter registry.
+    filter_fn = FILTERS[filter_name]
+    events = [e for e in events if filter_fn(e[0], e[1], e[2], pip)]
+
+    def report(subset_events, label: str) -> None:
+        reactions = compute_reactions(
+            bars, subset_events, forward_bars=forward_bars, entry=entry,
+        )
+        if not reactions:
+            click.echo(f"\n{label}: no reactions to analyze.")
+            return
+        click.echo(f"\n{label}   n={len(reactions)} events")
+        # 1. Favorable / adverse percentiles at each time bucket.
+        fav_p = favorable_percentiles(reactions, window_bars, [25, 50, 75, 90])
+        adv_p = adverse_percentiles(reactions, window_bars, [25, 50, 75, 90])
+        click.echo("\n  Max FAVORABLE (pips) by time window:")
+        click.echo(f"  {'bars':>4} {'hours':>6}   {'P25':>6} {'P50':>6} {'P75':>6} {'P90':>6}")
+        for w in window_bars:
+            hrs = w * 15 / 60
+            vals = [v / pip for v in fav_p[w]]
+            click.echo(f"  {w:>4} {hrs:>5.1f}h    {vals[0]:>6.1f} {vals[1]:>6.1f} {vals[2]:>6.1f} {vals[3]:>6.1f}")
+        click.echo("\n  Max ADVERSE (pips) by time window:")
+        click.echo(f"  {'bars':>4} {'hours':>6}   {'P25':>6} {'P50':>6} {'P75':>6} {'P90':>6}")
+        for w in window_bars:
+            hrs = w * 15 / 60
+            vals = [v / pip for v in adv_p[w]]
+            click.echo(f"  {w:>4} {hrs:>5.1f}h    {vals[0]:>6.1f} {vals[1]:>6.1f} {vals[2]:>6.1f} {vals[3]:>6.1f}")
+
+        # 2. Hit-rate + adverse-before-hit for each target across each window.
+        click.echo("\n  Target HIT RATE within N bars   |   Adverse before hit (pips)")
+        header_windows = "  ".join(f"{w:>3}b" for w in window_bars)
+        click.echo(f"  {'target':>6}   {header_windows}   |   {'adv P50':>7} {'adv P75':>7} {'adv P90':>7}")
+        for t in target_pips:
+            hit_cells = []
+            for w in window_bars:
+                s = target_stats(reactions, t * pip, w)
+                hit_cells.append(f"{s.hit_rate * 100:>3.0f}%")
+            # Use the widest window for adverse-before-hit stats.
+            widest = max(window_bars)
+            s_wide = target_stats(reactions, t * pip, widest)
+            click.echo(
+                f"  {int(t):>4}p    "
+                + "  ".join(hit_cells)
+                + "   |   "
+                + f"{s_wide.adv_before_hit_p50 / pip:>6.1f}p "
+                + f"{s_wide.adv_before_hit_p75 / pip:>6.1f}p "
+                + f"{s_wide.adv_before_hit_p90 / pip:>6.1f}p"
+            )
+
+    click.echo(
+        f"{instrument} {gran}  filter={filter_name}  entry={entry}  "
+        f"forward={forward_bars} bars"
+    )
+    if split is None:
+        report(events, label="all events")
+    else:
+        h1 = [e for e in events if e[0].time < split]
+        h2 = [e for e in events if e[0].time >= split]
+        report(h1, label=f"H1 (< {split})")
+        report(h2, label=f"H2 (>= {split})")
 
 
 def _iso_to_dt(s: str) -> datetime:
