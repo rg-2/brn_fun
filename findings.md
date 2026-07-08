@@ -108,3 +108,45 @@ Plausible macro trigger: **BoJ policy normalization began March 2024** after dec
 - Rolling-year edge over the 5y window would be more granular than a single midpoint split — worth doing next.
 - If backfilled to 10y we could split into 4 quarters and see how deep the stability goes.
 - GBP_JPY's flip demands a pair-specific explanation before including it in any live strategy.
+
+## 2026-07-07 — ATR-scaled thresholds and a metric-caveat learning
+
+Added `--bounce-atr` / `--break-atr` multipliers so bounce/break thresholds scale
+with per-touch ATR instead of being fixed pips. Then re-ran the full filter
+across all pairs at 2×ATR.
+
+### The finding: our `edge` metric is threshold-invariant
+
+Under the full filter, edges at 2×ATR are **identical** to 30p-fixed edges,
+pair by pair. Reason: `edge = avg_favorable − avg_adverse` measures the raw
+max-excursion magnitudes in the forward window, which are independent of the
+classification threshold. Threshold only decides how each event is *labeled*
+(bounce/break/both/chop) — it doesn't change the underlying magnitudes we're
+averaging.
+
+### What ATR-scaling *did* affect
+
+- **Cross-pair bounce% spread narrowed** — 27–63% at fixed 30p → 31–57% at
+  2×ATR. Some real normalization.
+- **GBP_JPY improved** — bounce rate 27% → 31%. Small lift, still lowest.
+- **Classification distribution shifted** — much more "both", almost no
+  "chop" at 2×ATR (tighter thresholds catch more events on both sides).
+
+### Bigger lesson
+
+The `edge` metric has been *descriptive* (average size of moves), not
+*evaluative* (what a real strategy would earn). Two-and-a-half sessions
+of "edge" numbers all reflected pure signal in the events *selected*, not
+in any particular threshold choice.
+
+The real test is a backtester with actual entry/target/stop rules — the
+threshold matters when the target/stop are *simulated*, because path
+dependency (which one hits first) then matters.
+
+### Verdict
+
+- ATR-scaled thresholds are available in the CLI now and useful for
+  cross-pair distribution comparison.
+- They do **not** change our confidence in the previous edge findings —
+  those were already about the events, not the thresholds.
+- Next real step to evaluate the filter is a backtester.

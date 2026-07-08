@@ -169,6 +169,8 @@ def characterize_touch(
     touch: Touch,
     *,
     forward_bars: int = 96,
+    bounce_thresh: float | None = None,
+    break_thresh: float | None = None,
     bounce_pips: float = 30.0,
     break_pips: float = 30.0,
     pip: float = 0.0001,
@@ -177,10 +179,19 @@ def characterize_touch(
 
     Favorable / adverse are measured from the level itself, not from the
     touching bar's close — the level is the anchor of the whole exercise.
+
+    Thresholds: pass ``bounce_thresh``/``break_thresh`` in price units to use
+    them directly (e.g. ATR-scaled by the caller). Otherwise, they're derived
+    from ``bounce_pips * pip`` / ``break_pips * pip``.
     """
     start = touch.idx + 1
     end = min(start + forward_bars, len(bars))
     window = bars[start:end]
+
+    if bounce_thresh is None:
+        bounce_thresh = bounce_pips * pip
+    if break_thresh is None:
+        break_thresh = break_pips * pip
 
     if not window:
         # Touch is right at the tail of data; no forward info available.
@@ -206,9 +217,6 @@ def characterize_touch(
 
     close_after = window[-1].close
     close_dist = close_after - level
-
-    bounce_thresh = bounce_pips * pip
-    break_thresh = break_pips * pip
 
     fav_hit = favorable >= bounce_thresh
     adv_hit = adverse >= break_thresh
@@ -470,6 +478,8 @@ def analyze(
     forward_bars: int = 96,
     bounce_pips: float = 30.0,
     break_pips: float = 30.0,
+    bounce_atr: float | None = None,
+    break_atr: float | None = None,
     pip: float = 0.0001,
     atr_period: int = 14,
     approach_bars: int = 20,
@@ -477,7 +487,14 @@ def analyze(
     slope_lookback: int = 480,
     trend_flat_pips: float = 50.0,
 ) -> Iterator[tuple[Touch, Context, Confirmation, Outcome_]]:
-    """Yield (touch, context, confirmation, outcome) for every event."""
+    """Yield (touch, context, confirmation, outcome) for every event.
+
+    Threshold modes:
+      - Default: fixed pip thresholds (``bounce_pips`` / ``break_pips``).
+      - ATR-scaled: set ``bounce_atr`` and/or ``break_atr`` to a multiplier;
+        each per-touch threshold becomes ``multiplier * context.atr``.
+        You can mix (e.g. fixed bounce, ATR break) if you want.
+    """
     # Precompute the SMA once so per-touch context is O(1) in the SMA lookup.
     sma_series = _rolling_mean_close(bars, sma_period)
     for touch in find_first_touches(bars, grid=grid, cooldown_bars=cooldown_bars):
@@ -489,12 +506,21 @@ def analyze(
             sma_series=sma_series,
         )
         confirmation = compute_confirmation(bars, touch)
+
+        # Resolve per-touch thresholds. ATR mode wins if set; otherwise pips.
+        bounce_thresh = (
+            bounce_atr * context.atr if bounce_atr is not None
+            else bounce_pips * pip
+        )
+        break_thresh = (
+            break_atr * context.atr if break_atr is not None
+            else break_pips * pip
+        )
         outcome = characterize_touch(
             bars, touch,
             forward_bars=forward_bars,
-            bounce_pips=bounce_pips,
-            break_pips=break_pips,
-            pip=pip,
+            bounce_thresh=bounce_thresh,
+            break_thresh=break_thresh,
         )
         yield touch, context, confirmation, outcome
 

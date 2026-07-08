@@ -243,6 +243,12 @@ def show(
               help="Favorable move (pips) required to tag 'bounce'.")
 @click.option("--break-pips", type=float, default=30.0, show_default=True,
               help="Adverse move (pips) required to tag 'break'.")
+@click.option("--bounce-atr", type=float, default=None,
+              help="Use ATR × this multiplier as the bounce threshold instead "
+                   "of --bounce-pips. Normalizes 'meaningful move' across pairs.")
+@click.option("--break-atr", type=float, default=None,
+              help="Use ATR × this multiplier as the break threshold instead "
+                   "of --break-pips.")
 @click.option("--pip", type=float, default=0.0001, show_default=True,
               help="Pip size (0.0001 for majors, 0.01 for JPY pairs).")
 @click.option("--complete-only/--all", default=True, show_default=True,
@@ -272,6 +278,8 @@ def touches(
     forward_bars: int,
     bounce_pips: float,
     break_pips: float,
+    bounce_atr: float | None,
+    break_atr: float | None,
     pip: float,
     complete_only: bool,
     export: Path | None,
@@ -300,7 +308,8 @@ def touches(
     events = list(analyze(
         bars,
         grid=grid_val, cooldown_bars=cooldown_bars, forward_bars=forward_bars,
-        bounce_pips=bounce_pips, break_pips=break_pips, pip=pip,
+        bounce_pips=bounce_pips, break_pips=break_pips,
+        bounce_atr=bounce_atr, break_atr=break_atr, pip=pip,
         atr_period=atr_period, approach_bars=approach_bars,
         sma_period=sma_period, slope_lookback=slope_lookback,
         trend_flat_pips=trend_flat_pips,
@@ -311,9 +320,13 @@ def touches(
 
     span_from = bars[0].time
     span_to = bars[-1].time
+    # Report the threshold mode so the reader knows which definition of
+    # bounce/break is being applied.
+    bnc_desc = f"{bounce_atr:g}×ATR" if bounce_atr is not None else f"{bounce_pips:g}p"
+    brk_desc = f"{break_atr:g}×ATR" if break_atr is not None else f"{break_pips:g}p"
     click.echo(
         f"{instrument} {gran}   grid={grid_val:g}   cooldown={cooldown_bars} bars   "
-        f"forward={forward_bars} bars"
+        f"forward={forward_bars} bars   thresh: bnc={bnc_desc} brk={brk_desc}"
     )
     click.echo(f"span: {span_from} → {span_to}   ({len(bars):,} bars)")
     click.echo(

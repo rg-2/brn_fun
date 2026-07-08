@@ -166,6 +166,24 @@ def test_break_when_from_below() -> None:
     assert outcome.adverse >= 0.0030
 
 
+def test_atr_scaled_threshold_uses_precomputed() -> None:
+    """When bounce_thresh is passed directly, it wins over bounce_pips."""
+    bars = [
+        _c("t0", 1.09, 1.095, close=1.094),
+        _c("t1", 1.099, 1.101, close=1.100),      # touch 1.10
+        _c("t2", 1.095, 1.100, close=1.097),      # 30-pip pullback
+    ]
+    touches = list(find_first_touches(bars, grid=0.01, cooldown_bars=100))
+    # With a tight threshold (10 pips = 0.001) the 30p pullback is a bounce.
+    tight = characterize_touch(bars, touches[0], forward_bars=5,
+                                bounce_thresh=0.0010, break_thresh=0.0010)
+    assert tight.tag == "bounce"
+    # With a loose threshold (100 pips = 0.010), the same move is chop.
+    loose = characterize_touch(bars, touches[0], forward_bars=5,
+                                bounce_thresh=0.0100, break_thresh=0.0100)
+    assert loose.tag == "chop"
+
+
 def test_chop_when_flat() -> None:
     """Small moves both ways → 'chop'."""
     bars = [
