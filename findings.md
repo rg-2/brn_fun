@@ -1024,3 +1024,68 @@ a very different strategy from the round-number bounce work.
 For the bounce-based portfolio, the answer stays: **AUD_USD round-number
 touches with 2p limit + spread** is the real edge. Everything else is
 noise or requires a different direction convention.
+
+## 2026-07-09 — Stop management + trend filter on AUD_USD: baseline is already tuned
+
+Added `breakeven_trigger_pips`, `trail_trigger_pips` + `trail_distance_pips`
+to `simulate_trade`, and `max_sma_slope_pips` (trend filter) to
+`backtest_touches`. Swept variants against the +2,203 pip AUD_USD baseline.
+
+### Breakeven snap: worse at every trigger < +50p
+
+| Trigger  | Total  | Δ    | Stops fired |
+|---------:|-------:|-----:|------------:|
+| +10p     | +799   | −1,404 | 253 (up from 132) |
+| +15p     | +1,337 |   −866 | 220 |
+| +20p     | +1,484 |   −719 | 198 |
+| +30p     | +2,100 |   −103 | 162 |
+| +50p     | +2,212 |     +9 | 135 (basically no-op) |
+
+Counterintuitive but consistent: moving stop to breakeven *increases*
+stopouts. Under `path_ambiguity=worst` on M1 bars, a single-bar move
+that both crosses the BE trigger AND dips back to entry resolves as
+"BE stop fires at $0" — even if price later rockets to target. Many
+would-be winners get stopped at 0.
+
+### Trailing stop: same story, all worse
+
+Best config (+50p trigger, 30p trail) still lost 151 pips vs baseline.
+
+### Trend-slope filter: essentially inert
+
+| Max |slope| pips | Trades | Total  | Δ    |
+|-----------------:|-------:|-------:|-----:|
+| 30p              |    307 | +1,996 | −207 |
+| **50p**          |    324 | **+2,218** | **+15** |
+| 80p+             |    328 | +2,203 |    0 |
+
+Only 4 trades filtered at 50p threshold for +15 pips of edge. Below 30p
+we cut too many good trades. AUD_USD's SMA-slope-in-pips rarely reaches
+"strong trend" magnitudes, so the filter is a no-op most of the time.
+
+### Why the baseline is so hard to beat
+
+The 30p stop is at a genuine sweet spot. Moving it up gets punished by
+the M1 backtest's worst-case path assumption: a bar with `fav >= BE trigger`
+AND `low <= BE stop` gets classified as "stop at 0" regardless of whether
+price later reaches target.
+
+Real-fill behavior would likely be somewhat better than the backtest
+shows (intra-bar timing matters and won't always go worst-case) but we
+can't quantify that without tick data.
+
+The 2018/2020 weakness ISN'T explained by SMA-slope. Something else
+distinguished those years — daily-range persistence, close-to-close
+volatility, or a filter we haven't tried. Filed for follow-up.
+
+### Net
+
+For the AUD_USD round-number strategy at M1 granularity with worst-case
+path assumption, **the baseline 60p target / 30p stop / 24h max / 2p limit
+config is essentially at the local optimum**. Meaningful improvements
+would require either:
+
+- Different data (ticks or M1 with intra-bar order) to relax the
+  worst-case ambiguity that punishes stop management, or
+- A different regime feature (not SMA-slope) that discriminates the
+  2018/2020 weak years from the strong years.

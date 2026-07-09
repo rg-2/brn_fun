@@ -129,8 +129,29 @@ def simulate_trade(
     stop_price: float,
     max_bars: int,
     path_ambiguity: PathAmbiguity = "worst",
+    breakeven_trigger: float = 0.0,
+    trail_trigger: float = 0.0,
+    trail_distance: float = 0.0,
 ) -> tuple[int, str, float, ExitReason]:
-    """Walk forward from ``entry_idx + 1``; return (exit_idx, exit_time, exit_price, reason)."""
+    """Walk forward from ``entry_idx + 1``; return (exit_idx, exit_time, exit_price, reason).
+
+    Stop management (all in price units, disabled by 0):
+
+    - ``breakeven_trigger``: once max favorable excursion reaches this,
+      snap the stop to ``entry_price``. Worst-case outcome becomes 0.
+    - ``trail_trigger`` + ``trail_distance``: once max favorable reaches
+      the trigger, keep the stop at ``trail_distance`` behind the running
+      favorable peak (only ever tightens; never loosens).
+
+    Stop updates are applied AFTER the current bar's exit check — a
+    single-bar move that both crosses the trigger and reverses to the
+    old stop is resolved by the standard path_ambiguity rule (worst-case
+    means old stop wins). Cleaner and matches how a live limit-order
+    stop would behave (broker can't act mid-bar).
+    """
+    current_stop = stop_price
+    max_fav = 0.0
+
     for offset in range(1, max_bars + 1):
         j = entry_idx + offset
         if j >= len(bars):
@@ -139,22 +160,46 @@ def simulate_trade(
 
         if direction == "long":
             hit_target = bar.high >= target_price
-            hit_stop = bar.low <= stop_price
+            hit_stop = bar.low <= current_stop
         else:  # short
             hit_target = bar.low <= target_price
-            hit_stop = bar.high >= stop_price
+            hit_stop = bar.high >= current_stop
 
         if hit_target and hit_stop:
             # Same bar contains both prices. We can't tell from OHLC alone
             # which fired first; the conservative assumption is stop-first.
             if path_ambiguity == "worst":
-                return j, bar.time, stop_price, "stop"
+                return j, bar.time, current_stop, "stop"
             else:
                 return j, bar.time, target_price, "target"
         if hit_target:
             return j, bar.time, target_price, "target"
         if hit_stop:
-            return j, bar.time, stop_price, "stop"
+            return j, bar.time, current_stop, "stop"
+
+        # Update running max favorable, then adjust stop for the *next* bar.
+        # Using the bar's high/low as the max extreme reached (worst-case
+        # timing means adverse fires before any stop tighten inside a bar).
+        if direction == "long":
+            fav_this_bar = max(0.0, bar.high - entry_price)
+        else:
+            fav_this_bar = max(0.0, entry_price - bar.low)
+        if fav_this_bar > max_fav:
+            max_fav = fav_this_bar
+            # Breakeven snap.
+            if breakeven_trigger > 0 and max_fav >= breakeven_trigger:
+                if direction == "long":
+                    current_stop = max(current_stop, entry_price)
+                else:
+                    current_stop = min(current_stop, entry_price)
+            # Trail behind the running peak (only ever tightens).
+            if trail_trigger > 0 and max_fav >= trail_trigger:
+                if direction == "long":
+                    trailed = entry_price + max_fav - trail_distance
+                    current_stop = max(current_stop, trailed)
+                else:
+                    trailed = entry_price - max_fav + trail_distance
+                    current_stop = min(current_stop, trailed)
 
     # Neither fired within max_bars — close at the last bar's close.
     last_j = min(entry_idx + max_bars, len(bars) - 1)
@@ -181,11 +226,24 @@ def backtest_touches(
     spread_pips: float = 0.0,
     limit_offset_pips: float = 0.0,
     limit_fill_window: int = 60,
+    breakeven_trigger_pips: float = 0.0,
+    trail_trigger_pips: float = 0.0,
+    trail_distance_pips: float = 0.0,
+    max_sma_slope_pips: float | None = None,
 ) -> list[Trade]:
     """Run a target/stop simulation over the filtered events.
 
     Thresholds are pip-based by default; set ``target_atr`` / ``stop_atr`` to
     an ATR multiplier to scale per-touch. Mixing is allowed.
+
+    Stop management (all pip-denominated, disabled by 0):
+      ``breakeven_trigger_pips`` — snap stop to entry once trade shows this
+      much profit. ``trail_trigger_pips`` + ``trail_distance_pips`` — trail
+      the stop this far behind the running peak once the trigger is reached.
+
+    Trend filter: ``max_sma_slope_pips`` skips events whose Context.sma_slope
+    magnitude (in pips) exceeds the threshold — the trade is dropped before
+    it enters. Use to avoid trading fades in strong directional markets.
     """
     if filter_name not in FILTERS:
         raise ValueError(
@@ -197,6 +255,14 @@ def backtest_touches(
     for touch, context, confirmation, _outcome in events:
         if not filter_fn(touch, context, confirmation, pip):
             continue
+
+        # Trend-strength filter: skip trades in markets with strong
+        # directional flow (context.sma_slope is signed price change of
+        # the 20-day SMA over the last 5 trading days).
+        if max_sma_slope_pips is not None:
+            slope_pips = abs(context.sma_slope) / pip
+            if slope_pips > max_sma_slope_pips:
+                continue
 
         # Decide the entry bar. "confirm" needs bar touch+1 to exist.
         # ``entry_offset`` adds additional bars of waiting after the base
@@ -265,6 +331,9 @@ def backtest_touches(
         exit_idx, exit_time, exit_price, reason = simulate_trade(
             bars, entry_idx, direction, entry_price,
             target_price, stop_price, max_bars, path_ambiguity,
+            breakeven_trigger=breakeven_trigger_pips * pip,
+            trail_trigger=trail_trigger_pips * pip,
+            trail_distance=trail_distance_pips * pip,
         )
 
         gross_pnl = (
