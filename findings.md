@@ -782,12 +782,68 @@ regime-fitted.
 
 ### Open follow-ups
 
-- Test a simpler global filter: "reject 10:00 & 13:00 UTC across all
-  pairs, keep the rest". More conservative than the H1-fitted per-pair
-  whitelist. Would show whether the two universally-negative hours are
-  enough.
+- ~~Test a simpler global filter: "reject 10:00 & 13:00 UTC across all
+  pairs, keep the rest".~~ **Done — see next section.**
 - Combine hour filter with the modest ATR-regime filter (e.g.
   USD_CAD "skip top quartile") and see if effects stack.
 - Investigate WHY 10:00 and 13:00 are drags. Both are just before
   major session-open volatility spikes. Hypothesis: post-touch
   reactions get disrupted by imminent liquidity events.
+
+## 2026-07-08 — Global hour filter: simple wins
+
+Tested progressively simpler global hour-filter rules to see how much
+of the per-pair whitelist's +5,375 pips is captured by dead-simple rules
+that don't require per-pair tuning.
+
+| Scenario                                | H2 (OOS) exp | 10y total |
+|-----------------------------------------|-------------:|----------:|
+| Unfiltered baseline                     | +1.76        | +4,253    |
+| **Reject {10, 13} UTC** (2 hours)      | **+2.11**   | **+4,861** |
+| Reject {1, 2, 6, 10, 13} (H1-negatives) | +1.65        | +4,329    |
+| Per-pair H1 whitelist                   | +2.30        | +5,375    |
+
+### Simple rule captures 91% of the complex gain
+
+Just rejecting **10:00 and 13:00 UTC globally** across all pairs
+delivers +4,861 pips over 10y — 91% of the per-pair whitelist's
++5,375. And it uses **zero per-pair tuning**. A two-line rule.
+
+### More selectivity actively hurts
+
+Adding 1, 2, 6 to the blacklist made H1 look better (+2,842 vs +2,695)
+but **crashed H2** (+1,486 vs +2,166) to *worse than the unfiltered
+baseline*. Classic overfit signature: the extra hours were H1-specific
+noise, not general drags.
+
+### Emerging portfolio (with global 2-hour blacklist)
+
+Combining what generalizes so far:
+
+- **4 pairs, pair-specific target/stop/max_bars/entry_offset** (M1 sweep)
+- **USD_CAD skip-top-quartile-ATR** (modest, walk-forward validated)
+- **Reject 10:00 & 13:00 UTC globally** (largest walk-forward gain)
+
+Rough estimate: portfolio delivers **+4,700-4,900 pips over 10y** with
+these three filters, up from the +4,253 baseline. About +2.15 pips/trade
+OOS expectancy.
+
+### Why 10:00 and 13:00?
+
+Speculative — no data yet — but both hours sit **just before major
+liquidity events**:
+- **10:00 UTC**: 30-60 min before European economic data (11:00
+  ECB / DE data), and 1-2h before the London-NY overlap begins.
+- **13:00 UTC**: 30 min before US 13:30 UTC data releases (NFP, CPI,
+  Fed statements), which happen weekly-ish and roil the market.
+
+Hypothesis: **round-number reactions get pre-empted by imminent
+liquidity events**. Traders positioning ahead of data see levels as
+tactical entries and blow through them. Worth investigating with
+data on ATR-of-next-bar and macro-event proximity.
+
+### Practical implication
+
+The **two-hour global blacklist** is our most defensible, ready-to-use
+strategy filter. Zero tuning, walk-forward validated, and adds 14%
+to total P&L for only 5.4% fewer trades.
