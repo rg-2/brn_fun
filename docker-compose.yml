@@ -1,0 +1,40 @@
+# Paper-mode live trader — Phase 1, no orders placed.
+#
+# Usage on the dev server:
+#   docker compose up -d              # start in background
+#   docker compose logs -f paper      # stream events
+#   docker compose stop paper         # graceful shutdown (SIGTERM)
+#   docker compose down               # stop + remove container
+#
+# On first startup the container's cold-start fetches the last ~6 days of
+# AUD_USD M1 bars from Oanda into data/brn_fun.sqlite. Subsequent polls
+# fetch only the delta since the newest stored bar.
+
+services:
+  paper:
+    build:
+      context: .
+      # Match the host UID so the mounted data dir isn't owned by root.
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    image: brn_fun/paper:latest
+    container_name: brn_paper
+
+    # Persist everything the trader writes on the host side.
+    #   - SQLite DB (candles + growing history)
+    #   - paper.log (append-only event log)
+    #   - paper_state.json (last-processed bar, per-level cooldown, etc.)
+    volumes:
+      - ./data:/app/data
+      # Read-only bind mounts — credentials + config live outside the image.
+      - ./.env:/app/.env:ro
+      - ./config.yaml:/app/config.yaml:ro
+
+    # Auto-restart on crash but stop when the operator explicitly stops it.
+    restart: unless-stopped
+
+    # Docker delivers SIGTERM on stop; the paper trader's request_stop()
+    # handler flushes state and closes the log within a few seconds.
+    stop_signal: SIGTERM
+    stop_grace_period: 15s

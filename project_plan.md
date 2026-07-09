@@ -33,6 +33,8 @@
 2. Should we look for long term trend continuation
 3. Should stop be above/below the wick of the breaking candle?
 4. Would be interesting to apply this to different levels, specifically, previous day high/low and previous week high / low provided there is some 'space' before the touch and bounce.
+5. Look at improving probability of round number trading using ML for outcome probability prediction
+6. Investigate Daily & Weekly H/L breakout trading
 
 ### Ready for some live testing
 1. Lets run this automated

@@ -102,9 +102,48 @@ confirmation window, currently-open hypothetical trades) is written to
 touches Oanda's order endpoints** — the API calls are limited to the
 read-only candle endpoint already used by `brn download`.
 
-Live-order execution (Phase 2), containerization, and a status dashboard
-are planned but not built yet — see the `Ready for some live testing`
-section of `project_plan.md`.
+Live-order execution (Phase 2) and a status dashboard are planned but not
+built yet — see the `Ready for some live testing` section of `project_plan.md`.
+
+### Deploying with Docker
+
+For unattended operation on a server, the paper trader ships with a
+Dockerfile and docker-compose config:
+
+```bash
+# One-time: sanity-check the image builds locally
+docker compose build
+
+# Start in the background (uses ./data as the persistence volume)
+docker compose up -d
+
+# Stream events as they happen
+docker compose logs -f paper
+
+# Stop cleanly (delivers SIGTERM; the trader flushes state before exiting)
+docker compose stop paper
+
+# Or tear down container + network entirely
+docker compose down
+```
+
+The compose file:
+
+- **Mounts `./data`** into `/app/data` so the SQLite DB, `paper.log`, and
+  `paper_state.json` live on the host and survive image rebuilds. Point
+  it at your existing `data/` directory to reuse the historical M1 bars
+  you've already downloaded; on a fresh host, the trader cold-starts by
+  fetching the last ~6 days of AUD_USD M1 from Oanda automatically.
+- **Bind-mounts `./.env`** read-only so Oanda credentials never end up
+  baked into the image or in the git tree.
+- **Uses `restart: unless-stopped`** so a crash comes back up automatically,
+  but explicit `docker compose stop` stays stopped.
+- **Runs as a non-root user** matching the host UID (override with
+  `UID=… GID=… docker compose up -d` if your host uid isn't 1000) so the
+  files it writes to `./data` aren't root-owned.
+
+Because the container only talks to the read-only Oanda candle endpoint,
+this is safe to run even against a live-account API key.
 
 ## Anatomy of a strategy run
 

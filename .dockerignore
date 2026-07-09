@@ -1,0 +1,29 @@
+# Runtime data — huge and machine-specific.
+data/
+.venv/
+
+# Keep secrets out of the image. Mounted read-only by docker-compose.
+.env
+.env.local
+
+# Git + editor cruft.
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+.DS_Store
+
+# Docs, tests, analysis scripts — not needed at runtime.
+docs/
+tests/
+analysis/
+
+# Python caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Local Claude state and MEMORY files.
+.claude/
