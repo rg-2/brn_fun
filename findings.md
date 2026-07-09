@@ -1089,3 +1089,44 @@ would require either:
   worst-case ambiguity that punishes stop management, or
 - A different regime feature (not SMA-slope) that discriminates the
   2018/2020 weak years from the strong years.
+
+## 2026-07-09 — Cooldown × max_bars sweep confirms baseline is optimal
+
+Swept 4 cooldown values (2.5, 5, 10, 15 trading days) × 5 max_bars
+values (8h, 12h, 24h, 48h, 72h) on AUD_USD with the full realistic
+config (2p limit, 1p spread, 15-min entry offset). See
+`analysis/audusd_cooldown_maxbars.py`.
+
+### Grid — min(H1, H2) per-trade expectancy
+
+| cooldown \ max_bars | 8h    | 12h   | **24h**  | 48h   | 72h   |
+|---------------------|------:|------:|---------:|------:|------:|
+| 2.5 days            | +0.33 | +1.81 | +1.56   | +2.50 | +1.98 |
+| **5 days**          | +1.65 | +3.29 | **+4.16** | **+4.24** | +3.93 |
+| 10 days             | −3.12 | −1.94 | −1.12   | −1.29 | −1.28 |
+| 15 days             | −3.47 | −2.08 | −1.18   | −2.33 | −2.67 |
+
+### Findings
+
+**Baseline (7200/1440) is essentially at the local optimum.** The single
+best cell (7200/2880) beats baseline by **+0.09 pips/trade, +97 pips
+over 10y** — within noise.
+
+**5-day cooldown is a genuine plateau with a cliff on both sides:**
+- 2.5-day cooldown: 45% more trades (477 vs 328) and higher total pips
+  (up to +3,059) but H1 quality collapses. Trading more, but each
+  trade worse.
+- 10+ day cooldown: 30-45% fewer trades AND H1 expectancy goes negative
+  across the row. Not fewer-but-better; fewer and worse.
+
+**max_bars plateau from 24h to 48h:** both give ~+4.2 min-exp. Beyond
+48h H1 drifts down; below 12h both halves suffer.
+
+**Regime effect dwarfs parameter tuning.** Every cell shows H2 exp
+2-3× H1 exp. No cooldown/max_bars combo dents that.
+
+### Verdict
+
+Keep baseline `cooldown=7200 (5 days), max_bars=1440 (24h)`. The tiny
+theoretical improvement at 7200/2880 (+0.09 exp) doesn't justify
+holding trades 2× longer per position. Closes task #18.
