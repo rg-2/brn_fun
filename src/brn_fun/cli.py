@@ -24,6 +24,7 @@ from .reaction import (
     favorable_percentiles,
     target_stats,
 )
+from .strategy import STRATEGIES, get_strategy
 
 # Rough time-per-bar for granularity codes we might see. Used only for
 # human-readable hour labels in the reaction table.
@@ -886,6 +887,199 @@ def reaction(
         h2 = [e for e in events if e[0].time >= split]
         report(h1, label=f"H1 (< {split})")
         report(h2, label=f"H2 (>= {split})")
+
+
+@cli.group("strategy", invoke_without_command=True)
+@click.pass_context
+def strategy_group(ctx: click.Context) -> None:
+    """Named strategies — reproducible end-to-end runs.
+
+    Run without a subcommand to see the list. See ``brn strategy list``
+    for the same list and ``brn strategy run NAME`` to execute one.
+    """
+    if ctx.invoked_subcommand is None:
+        _print_strategy_list()
+
+
+@strategy_group.command("list")
+def strategy_list_cmd() -> None:
+    """List all named strategies."""
+    _print_strategy_list()
+
+
+def _print_strategy_list() -> None:
+    click.echo("Named strategies:")
+    for name, cfg in sorted(STRATEGIES.items()):
+        first = cfg.description.strip().splitlines()[0] if cfg.description else ""
+        click.echo(f"  {name:<12}  {cfg.instrument:<9}  {first}")
+    click.echo()
+    click.echo("Run with:   brn strategy run NAME")
+    click.echo("Details:    brn strategy info NAME")
+
+
+@strategy_group.command("info")
+@click.argument("name", type=click.Choice(list(STRATEGIES)))
+def strategy_info_cmd(name: str) -> None:
+    """Print the full parameter set for one strategy."""
+    _print_strategy_info(get_strategy(name))
+
+
+def _print_strategy_info(cfg) -> None:
+    click.echo(f"Strategy: {cfg.name}")
+    click.echo(f"Instrument: {cfg.instrument} ({cfg.granularity})")
+    click.echo()
+    click.echo(cfg.description.rstrip())
+    click.echo()
+    click.echo("Parameters:")
+    click.echo(f"  Signal grid:          {cfg.grid} (every {int(cfg.grid/cfg.pip)} pips)")
+    click.echo(f"  Cooldown:             {cfg.cooldown_bars} bars")
+    click.echo(f"  Filter:               {cfg.filter_name}")
+    click.echo(f"  Entry:                {cfg.entry} + {cfg.entry_offset} bar(s) wait")
+    if cfg.limit_offset_pips > 0:
+        click.echo(f"  Order:                limit at {cfg.limit_offset_pips:g}p favorable, "
+                   f"fill window {cfg.limit_fill_window} bars")
+    else:
+        click.echo("  Order:                market at close")
+    click.echo(f"  Target:               {cfg.target_pips:g} pips")
+    click.echo(f"  Stop:                 {cfg.stop_pips:g} pips")
+    click.echo(f"  Max hold:             {cfg.max_bars} bars")
+    click.echo(f"  Spread cost:          {cfg.spread_pips:g} pips round-trip")
+    if cfg.breakeven_trigger_pips > 0:
+        click.echo(f"  Breakeven trigger:    +{cfg.breakeven_trigger_pips:g}p")
+    if cfg.trail_trigger_pips > 0:
+        click.echo(f"  Trailing stop:        +{cfg.trail_trigger_pips:g}p trigger, "
+                   f"{cfg.trail_distance_pips:g}p distance")
+    if cfg.max_sma_slope_pips is not None:
+        click.echo(f"  Skip if |SMA slope| > {cfg.max_sma_slope_pips:g}p")
+    if cfg.reject_hours_utc:
+        click.echo(f"  Reject entry hours (UTC): {sorted(cfg.reject_hours_utc)}")
+    if cfg.reference_pnl_10y:
+        click.echo()
+        click.echo("Reference 10y performance:")
+        click.echo(f"  {cfg.reference_pnl_10y}")
+
+
+@strategy_group.command("run")
+@click.argument("name", type=click.Choice(list(STRATEGIES)))
+@click.option("--start", type=str, default=None,
+              help="Restrict to signals on/after this ISO date (YYYY-MM-DD).")
+@click.option("--end", type=str, default=None,
+              help="Restrict to signals strictly before this ISO date.")
+@click.option("--head", type=int, default=10, show_default=True,
+              help="Trades to print in the tail table.")
+@click.option("--export", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="Write per-trade rows to CSV.")
+@click.pass_context
+def strategy_run_cmd(
+    ctx: click.Context,
+    name: str,
+    start: str | None,
+    end: str | None,
+    head: int,
+    export: Path | None,
+) -> None:
+    """Run a named strategy end-to-end and print the summary."""
+    cfg = get_strategy(name)
+    app_cfg = ctx.obj["config"]
+
+    click.echo(f"Strategy: {cfg.name}   Instrument: {cfg.instrument} ({cfg.granularity})")
+    if cfg.reference_pnl_10y:
+        click.echo(f"Reference: {cfg.reference_pnl_10y}")
+    click.echo()
+
+    with connect(app_cfg.db_path) as conn:
+        bars = fetch_candles(
+            conn, cfg.instrument, cfg.granularity,
+            limit=None, order="asc", complete_only=True,
+        )
+    if not bars:
+        click.echo(
+            f"No {cfg.granularity} bars stored for {cfg.instrument} — "
+            f"run `brn download {cfg.instrument} --granularity {cfg.granularity}` first."
+        )
+        return
+
+    click.echo(f"Bars: {len(bars):,} ({bars[0].time[:10]} → {bars[-1].time[:10]})")
+    click.echo("Analyzing signals…")
+
+    events = list(analyze(
+        bars, grid=cfg.grid, cooldown_bars=cfg.cooldown_bars,
+        forward_bars=cfg.forward_bars, pip=cfg.pip,
+    ))
+    click.echo(f"  {len(events)} raw signals")
+
+    if start is not None:
+        events = [e for e in events if e[0].time >= start]
+    if end is not None:
+        events = [e for e in events if e[0].time < end]
+    if start or end:
+        click.echo(f"  {len(events)} after date filter ({start or 'start'} → {end or 'end'})")
+
+    click.echo("Backtesting…")
+    trades = backtest_touches(
+        bars, events,
+        pip=cfg.pip,
+        filter_name=cfg.filter_name,
+        entry=cfg.entry,  # type: ignore[arg-type]
+        entry_offset=cfg.entry_offset,
+        target_pips=cfg.target_pips, stop_pips=cfg.stop_pips,
+        target_atr=cfg.target_atr, stop_atr=cfg.stop_atr,
+        max_bars=cfg.max_bars,
+        path_ambiguity=cfg.path_ambiguity,  # type: ignore[arg-type]
+        spread_pips=cfg.spread_pips,
+        limit_offset_pips=cfg.limit_offset_pips,
+        limit_fill_window=cfg.limit_fill_window,
+        breakeven_trigger_pips=cfg.breakeven_trigger_pips,
+        trail_trigger_pips=cfg.trail_trigger_pips,
+        trail_distance_pips=cfg.trail_distance_pips,
+        max_sma_slope_pips=cfg.max_sma_slope_pips,
+    )
+
+    if cfg.reject_hours_utc:
+        before = len(trades)
+        trades = [t for t in trades
+                  if int(t.entry_time[11:13]) not in cfg.reject_hours_utc]
+        click.echo(f"  hour filter dropped {before - len(trades)} trades")
+
+    stats = summarize_trades(trades, pip=cfg.pip)
+    click.echo()
+
+    if stats["n"] == 0:
+        click.echo("No trades to report.")
+        return
+
+    click.echo(
+        f"trades: {stats['n']}   win rate: {stats['win_rate']:.1f}%   "
+        f"expectancy: {stats['expectancy_pips']:+.2f} pips/trade   "
+        f"total: {stats['total_pips']:+.1f} pips"
+    )
+    click.echo(
+        f"avg win: {stats['avg_win_pips']:+.1f} pips   "
+        f"avg loss: {stats['avg_loss_pips']:+.1f} pips   "
+        f"max drawdown: {stats['max_drawdown_pips']:.1f} pips"
+    )
+    click.echo(
+        f"exits: target={stats['target']}  stop={stats['stop']}  "
+        f"timeout={stats['timeout']}   avg hold: {stats['avg_hold_bars']:.1f} bars"
+    )
+
+    if head > 0 and trades:
+        click.echo("")
+        click.echo(
+            f"{'entry_time':<30}  dir    lvl     entry     exit   "
+            f"{'pnl':>6}  reason   hold"
+        )
+        for t in trades[-head:]:
+            click.echo(
+                f"{t.entry_time:<30}  {t.direction:<5}  {t.level:>6.4f}  "
+                f"{t.entry_price:>7.5f}  {t.exit_price:>7.5f}  "
+                f"{t.pnl_price / cfg.pip:>+6.1f}  {t.exit_reason:<7}  {t.hold_bars:>4d}"
+            )
+        click.echo(f"(showing last {min(head, len(trades))} of {len(trades)})")
+
+    if export is not None:
+        _export_trades(export, trades, pip=cfg.pip)
+        click.echo(f"\nwrote {len(trades)} trades to {export}")
 
 
 def _iso_to_dt(s: str) -> datetime:
