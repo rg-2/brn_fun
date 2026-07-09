@@ -637,3 +637,69 @@ is real; the specific per-trade edges are optimistic.
    avoid the leakage above.
 4. **Global market volatility indicator** (e.g. sum of pair ATRs, VIX
    proxy) might predict which config-set to run — dynamic switching.
+
+## 2026-07-08 — Rolling ATR filter: walk-forward test
+
+Removed the earlier data leakage by (a) computing each event's ATR
+percentile within a trailing 365-day window of only past events, and
+(b) using H1 (2016-2020) to CHOOSE the best percentile band per pair,
+then applying that choice to H2 (2021-2026) and reporting the honest
+OOS result. See `analysis/rolling_atr_filter.py`.
+
+### Portfolio comparison
+
+| Method                    | Trades | Per-trade | Total 10y |
+|---------------------------|-------:|----------:|----------:|
+| Unfiltered (baseline)     | 2,293  | +1.85    | **+4,253** |
+| In-sample fit (leaky)     | 1,344  | +2.50    |    +3,367 |
+| **Walk-forward rolling ATR** | 1,844 | **+2.24** | **+4,133** |
+
+The +35% per-trade edge boost claimed by the in-sample analysis
+was **mostly data leakage**. The honest walk-forward result is
++21% per-trade edge lift — real, but modest.
+
+### Per-pair walk-forward outcomes
+
+| Pair    | H1 chose         | H2 OOS n | H2 OOS exp | Verdict |
+|---------|------------------|---------:|-----------:|---------|
+| AUD_USD | all              |     207  |     +6.23  | no filter needed |
+| USD_CAD | bot3 (skip Q4)   |     184  |     +1.91  | filter genuinely helps (vs +1.07) |
+| EUR_JPY | extremes (Q1+Q4) |     223  |     −0.57  | ⚠ overfit — collapsed OOS |
+| GBP_USD | all              |     307  |     +0.64  | no filter helps or hurts |
+
+**Key learnings**:
+
+1. **Simple rules generalize; complex bands overfit.** USD_CAD's
+   "skip highest quartile" survived H2; EUR_JPY's "extremes only" got
+   wrecked. Anything sitting on an H1 curve-fit is dangerous.
+2. **AUD_USD doesn't need a filter.** Its 60p target *implicitly*
+   requires vol to reach — the config-scale itself is the filter.
+3. **The vol-regime signal is real but modest.** ~20% per-trade edge
+   lift, not 35%. In-sample analysis was optimistic.
+
+### Honest current-best portfolio (with only what generalized)
+
+| Pair    | Config                                          | 10y P&L |
+|---------|-------------------------------------------------|--------:|
+| AUD_USD | 60/30/24h  offset 15 min   (no vol filter)     | +2,013 |
+| USD_CAD | 15/20/4h   offset  1 min   skip top-quartile ATR | +692* |
+| EUR_JPY | 30/15/2h   offset 60 min   (no vol filter)     |   +725 |
+| GBP_USD | 30/15/2h   offset 60 min   (no vol filter)     |   +686 |
+| **Total** |                                                | **~+4,116** |
+
+*USD_CAD figure combines H1 in-sample (+683) + H2 OOS (+352), minus H1
+that lands outside the walk-forward window.
+
+Modest improvement over the +4,253 unfiltered — the "extra" edge from
+avoiding data leakage isn't much. Realistically **the vol-regime
+insight is a research finding but not a huge alpha booster**.
+
+### Open questions
+
+- Try a GLOBAL vol filter (e.g. skip all pairs when average ATR is in
+  bottom decile) instead of per-pair — might identify calendar
+  regime changes that hurt all pairs.
+- The decay in 2024-2026 might not be volatility-related — investigate
+  other regime factors (spread widening? liquidity? correlation shift?).
+- Rolling window size (365 days) chosen without tuning — try 90, 180,
+  730 days and see if the walk-forward result improves.
