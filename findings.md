@@ -969,3 +969,58 @@ at market entry. EUR_JPY and GBP_USD are noise after realistic costs.
 
 Combined: ~+2,500 pips over 10y across (arguably) 2 pairs, or ~+2,200
 pips just on AUD_USD alone.
+
+## 2026-07-09 — Prev-day / prev-week H/L signals: bounces don't work
+
+Added a new signal source: touches of the previous trading day's high/low
+and previous ISO week's high/low. Trading day boundary at 22:00 UTC
+(forex convention). Levels are **armed** only after price has been at
+least 2×ATR away for at least 60 M1 bars — filters the "day opens right
+at yesterday's high" no-space case.
+
+Detection produces plenty of signal — AUD_USD alone: **2,656 prev-day
+events + 519 prev-week events** over 10 years (vs 395 round-number
+events, so ~7× more).
+
+### But the bounce direction is wrong
+
+Backtested the signals across all 7 pairs using each pair's known-winning
+round-number config (2p limit, spread applied, worst-case path). Result:
+
+| Signal type       | Pair verdicts (out of 7)          |
+|-------------------|-----------------------------------|
+| Prev-day H/L      | 6 both-halves-negative, 1 flip    |
+| Prev-week H/L     | 6 both-halves-negative, 1 flip    |
+
+Only AUD_USD showed any signal, and only in H2 (+0.94 exp, +1,046 pips) —
+H1 was −1.86 exp. Regime flip, not a durable pattern.
+
+GBP_JPY was catastrophic (−3.17 pips/trade, −7,404 total) — that pair
+rarely stops when it breaks a daily level.
+
+USD_CAD's **51% win rate but −1.40 pips/trade** is diagnostic: the
+little bounces do happen (small wins), but when the level breaks, it
+breaks hard, and the big losses dominate.
+
+### Why this makes sense
+
+Round numbers work because they carry **structural / psychological**
+significance — traders think in whole cents.
+
+Prev-day and prev-week H/L are **breakout levels**, not bounce levels.
+They mark the *edge of a recent range*. When price returns to test them,
+it's often *because* momentum wants to break through — otherwise price
+wouldn't have gotten there. Bouncing off them is a countertrend bet
+that loses on average.
+
+### Bottom line — bounces off daily/weekly levels: no signal
+
+The user's intuition that these levels matter is right, but the DIRECTION
+is inverted. To make money on prev-day/week H/L touches, you'd need to
+trade the BREAKOUT (long the up-touch, short the down-touch) — the
+opposite of what we tested. That's a candidate follow-up but structurally
+a very different strategy from the round-number bounce work.
+
+For the bounce-based portfolio, the answer stays: **AUD_USD round-number
+touches with 2p limit + spread** is the real edge. Everything else is
+noise or requires a different direction convention.

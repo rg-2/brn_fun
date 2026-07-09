@@ -492,12 +492,15 @@ def _export_touches(
 @click.option("--path-ambiguity", type=click.Choice(["worst", "best"]),
               default="worst", show_default=True,
               help="If a bar contains both target and stop, which fires first.")
-@click.option("--spread-pips", type=float, default=0.0, show_default=True,
-              help="Round-trip spread cost in pips, deducted from every trade.")
-@click.option("--limit-offset-pips", type=float, default=0.0, show_default=True,
-              help="If > 0, use a limit order at this many pips FAVORABLE to "
-                   "signal (below for longs, above for shorts). Trade fires "
-                   "only when price touches the limit within the fill window.")
+@click.option("--spread-pips", type=float, default=1.0, show_default=True,
+              help="Round-trip spread cost in pips, deducted from every trade. "
+                   "Rough per-pair estimates: 1.0 majors, 1.2 GBP crosses, "
+                   "1.5 JPY crosses. NEVER report P&L without a spread cost.")
+@click.option("--limit-offset-pips", type=float, default=2.0, show_default=True,
+              help="Limit order at this many pips FAVORABLE to signal "
+                   "(below for longs, above for shorts). Default 2p should "
+                   "at minimum cover the spread. Pass 0 only for research "
+                   "comparison to market entry.")
 @click.option("--limit-fill-window", type=int, default=60, show_default=True,
               help="Bars past signal to wait for the limit to fill "
                    "(default 60 M1 = 1 hour).")

@@ -31,3 +31,5 @@
 ### Things to not forget
 1. Is there a pattern after the touch? Confirmation bar, engulfing bar, pin-bar, bull nose, etc.
 2. Should we look for long term trend continuation
+3. Should stop be above/below the wick of the breaking candle?
+4. Would be interesting to apply this to different levels, specifically, previous day high/low and previous week high / low provided there is some 'space' before the touch and bounce.
