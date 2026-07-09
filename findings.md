@@ -932,3 +932,40 @@ overwhelmingly negative trades. Rough estimate: **~+2,750-3,000 pips over
   fine at +0.8-1.0 per-trade unfiltered, but that's less than typical
   spread. Same lesson different way: **per-trade expectancy must clear
   the spread with room to spare**.
+
+### Can limits rescue the losing pairs? — extensive sweep says no
+
+Followed the user's question by sweeping limit offset (0.5-3.0p) × fill
+window (10-60 min) for USD_CAD, EUR_JPY, and GBP_USD.
+
+**USD_CAD:** market entry (+308) beats every limit combo. Tight 15p
+target hits fast — waiting for a fill misses the reactions.
+
+**EUR_JPY:** best combo (1.5p offset, 10min window) recovers from −340
+to **−123** — 64% improvement but still losing. H1/H2 flip.
+
+**GBP_USD:** best combo (2p offset, 20-30min window) gets to **−67**
+with H2 slightly positive (+0.05) but H1 still negative → regime-flipped.
+
+**Why limits can't rescue them:**
+
+| Pair    | Per-trade edge | Spread | Room to work with |
+|---------|--------------:|-------:|-------------------|
+| AUD_USD |       +5.10p |  1.0p | +4.1p — headroom for spread AND limit friction |
+| USD_CAD |       +1.59p |  1.0p | +0.6p — barely clears |
+| EUR_JPY |       +1.02p |  1.5p | −0.5p — already underwater |
+| GBP_USD |       +1.03p |  1.2p |  0.0p — marginal |
+
+**Only AUD_USD has enough per-trade edge (5+ pips) to absorb spread
+AND benefit from limit fills.** The others were only "profitable" in
+the mid-price backtest because we weren't paying the spread you
+actually pay in reality.
+
+### Bottom line
+
+The realistic tradable portfolio is really **just AUD_USD** with 2p
+limit entries. USD_CAD contributes a small +308 supplementary income
+at market entry. EUR_JPY and GBP_USD are noise after realistic costs.
+
+Combined: ~+2,500 pips over 10y across (arguably) 2 pairs, or ~+2,200
+pips just on AUD_USD alone.
