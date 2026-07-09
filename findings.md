@@ -847,3 +847,88 @@ data on ATR-of-next-bar and macro-event proximity.
 The **two-hour global blacklist** is our most defensible, ready-to-use
 strategy filter. Zero tuning, walk-forward validated, and adds 14%
 to total P&L for only 5.4% fewer trades.
+
+## 2026-07-08 — Spread costs + limit entries (reality check)
+
+Added ``spread_pips`` (round-trip cost deducted at exit) and
+``limit_offset_pips`` + ``limit_fill_window`` (resting limit at a
+favorable price) to the backtester. Swept limit offset from 0 to 8 pips
+per portfolio pair with realistic spreads (majors 1.0p, GBP_USD 1.2p,
+EUR_JPY 1.5p). See `analysis/spread_limit_sweep.py`.
+
+### AUD_USD — limit entries are a big win
+
+| Limit offset | Fill% | Per-trade | 10y total | H2 OOS exp |
+|-------------:|------:|----------:|----------:|-----------:|
+|  0p (market) | 100%  |  +4.10p  |   +1,618 |     +5.23  |
+|  1p          |  92%  |  +5.21p  |   +1,887 |     +6.92  |
+|  **2p**     |  **83%** | **+6.72p** | **+2,203** | **+9.12** |
+|  3p          |  74%  |  +6.84p  |   +1,998 |     +9.71  |
+|  5p          |  61%  |  +6.86p  |   +1,639 |     +9.90  |
+|  8p          |  43%  |  +6.50p  |   +1,091 |    +12.49  |
+
+Sweet spot: **2p favorable limit**. +64% per-trade edge lift over market
+entry, +36% more total pips, and H2 OOS edge nearly doubles (+5.23 → +9.12).
+Per-trade edge keeps climbing out to ~5p offset, but total pips peaks at
+2-3p because fill rate collapses.
+
+Answer to "could we buy even lower for more profit?": **yes on a per-trade
+basis** — edge keeps improving out to ~5p — but total P&L peaks at 2-3p
+because you miss too many trades past that. Choose based on whether you
+maximize per-trade edge or total pips.
+
+### Spread costs kill the small-edge pairs
+
+Applying realistic spread to each pair's baseline strategy:
+
+| Pair    | No cost 10y | With spread only | With best limit |
+|---------|------------:|-----------------:|----------------:|
+| AUD_USD |     +2,013 |         +1,618  |    +2,203 (2p) |
+| USD_CAD |       +828 |           +308  |      +308 (0p) |
+| EUR_JPY |       +725 |         **−340** |     unusable  |
+| GBP_USD |       +686 |         **−115** |     unusable  |
+
+EUR_JPY (spread 1.5p, per-trade edge only +1.02) and GBP_USD (spread 1.2p,
+per-trade edge +1.03) don't survive real costs. Their per-trade edges
+were smaller than the spread they'd pay.
+
+USD_CAD's tight targets + 4h max hold mean limit entries eat too much of
+the reaction — market entry is best.
+
+### Honest portfolio after spread + limit optimization
+
+| Pair    | Config                                | 10y P&L |
+|---------|---------------------------------------|--------:|
+| AUD_USD | 60/30/24h, **2p limit entry**         | +2,203 |
+| USD_CAD | 15/20/4h, market entry                |   +308 |
+| ~~EUR_JPY~~ | *too thin after 1.5p spread*      |   skip |
+| ~~GBP_USD~~ | *too thin after 1.2p spread*      |   skip |
+| **Total** |                                     | **~+2,511** |
+
+Reality: down from the +4,253 no-cost baseline to **~+2,500 pips over 10y**
+across two viable pairs.
+
+**But AUD_USD stands out**: ~30 trades/year at +6.72p per trade, or roughly
+**+200 pips/year** on a single pair with clean OOS validation, walk-forward
+hour filter still applicable, and a sensible R:R (60/30 = 2:1).
+
+### Combining with the hour filter
+
+Applying the earlier 2-hour blacklist (reject 10:00 and 13:00 UTC) on top
+of the spread+limit portfolio should stack — hour filter removed
+overwhelmingly negative trades. Rough estimate: **~+2,750-3,000 pips over
+10y** on the combined 2-pair portfolio. Not yet formally tested — pending.
+
+### Big takeaways
+
+- **Spread costs matter a lot.** The +4,253 baseline was a mirage for
+  half the portfolio.
+- **The user's intuition on limit entries was validated** — for
+  AUD_USD, resting at 2p below the market close nearly doubles per-trade
+  edge over market entry.
+- **Tight-target strategies (USD_CAD) can't afford to wait** for limit
+  fills; their max hold is too short.
+- **Small edges get destroyed by spread**. EUR_JPY and GBP_USD looked
+  fine at +0.8-1.0 per-trade unfiltered, but that's less than typical
+  spread. Same lesson different way: **per-trade expectancy must clear
+  the spread with room to spare**.

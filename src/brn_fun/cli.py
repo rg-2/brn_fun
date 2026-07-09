@@ -492,6 +492,15 @@ def _export_touches(
 @click.option("--path-ambiguity", type=click.Choice(["worst", "best"]),
               default="worst", show_default=True,
               help="If a bar contains both target and stop, which fires first.")
+@click.option("--spread-pips", type=float, default=0.0, show_default=True,
+              help="Round-trip spread cost in pips, deducted from every trade.")
+@click.option("--limit-offset-pips", type=float, default=0.0, show_default=True,
+              help="If > 0, use a limit order at this many pips FAVORABLE to "
+                   "signal (below for longs, above for shorts). Trade fires "
+                   "only when price touches the limit within the fill window.")
+@click.option("--limit-fill-window", type=int, default=60, show_default=True,
+              help="Bars past signal to wait for the limit to fill "
+                   "(default 60 M1 = 1 hour).")
 @click.option("--complete-only/--all", default=True, show_default=True,
               help="Skip the currently-forming bar when reading history.")
 @click.option("--head", type=int, default=10, show_default=True,
@@ -517,6 +526,9 @@ def backtest(
     stop_atr: float | None,
     max_bars: int,
     path_ambiguity: str,
+    spread_pips: float,
+    limit_offset_pips: float,
+    limit_fill_window: int,
     complete_only: bool,
     head: int,
     export: Path | None,
@@ -554,6 +566,9 @@ def backtest(
         target_atr=target_atr, stop_atr=stop_atr,
         max_bars=max_bars,
         path_ambiguity=path_ambiguity,  # type: ignore[arg-type]
+        spread_pips=spread_pips,
+        limit_offset_pips=limit_offset_pips,
+        limit_fill_window=limit_fill_window,
     )
     stats = summarize_trades(trades, pip=pip)
 

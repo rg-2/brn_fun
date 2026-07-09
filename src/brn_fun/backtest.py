@@ -42,11 +42,17 @@ PathAmbiguity = Literal["worst", "best"]
 
 @dataclass(frozen=True, slots=True)
 class Trade:
-    """One simulated trade from entry to exit."""
+    """One simulated trade from entry to exit.
 
-    entry_idx: int
+    When ``limit_offset_pips > 0``, ``signal_price`` is what a market order
+    would have paid at close of the signal bar and ``entry_price`` is what
+    the resting limit actually filled at. When 0, the two are equal.
+    """
+
+    entry_idx: int             # bar the limit filled on (or signal bar if market)
     entry_time: str
-    entry_price: float
+    entry_price: float         # actual fill price (may be better than signal)
+    signal_price: float        # close of the signal bar (what market would pay)
     direction: Direction
     level: float               # the round-number level that triggered the entry
     target_price: float
@@ -172,6 +178,9 @@ def backtest_touches(
     stop_atr: float | None = None,
     max_bars: int = 96,
     path_ambiguity: PathAmbiguity = "worst",
+    spread_pips: float = 0.0,
+    limit_offset_pips: float = 0.0,
+    limit_fill_window: int = 60,
 ) -> list[Trade]:
     """Run a target/stop simulation over the filtered events.
 
@@ -194,17 +203,50 @@ def backtest_touches(
         # entry bar — useful on fine granularities where 1 bar is a very
         # short confirmation (e.g. 1 min at M1 vs 15 min at M15).
         base_offset = 0 if entry == "touch" else 1
-        entry_idx = touch.idx + base_offset + entry_offset
-        if entry_idx >= len(bars):
+        signal_idx = touch.idx + base_offset + entry_offset
+        if signal_idx >= len(bars):
             continue
 
-        entry_price = bars[entry_idx].close
+        signal_price = bars[signal_idx].close
 
         # Physical bet: up-touch means we expect price to REJECT from above,
         # so short; down-touch means bounce up, so long.
         direction: Direction = "short" if touch.direction == "up" else "long"
 
-        # Per-trade thresholds.
+        # --- Entry: market at signal close, or wait for a favorable limit ---
+        if limit_offset_pips > 0:
+            # Limit order at offset pips *favorable* to signal — below for
+            # longs (buy dips), above for shorts (sell rallies). We watch
+            # bars for up to ``limit_fill_window`` bars past signal; if the
+            # low (long) / high (short) touches our limit, we fill at limit
+            # price and the trade starts from that bar. If not, we skip.
+            if direction == "long":
+                limit_price = signal_price - limit_offset_pips * pip
+            else:
+                limit_price = signal_price + limit_offset_pips * pip
+            fill_idx: int | None = None
+            for lookahead in range(1, limit_fill_window + 1):
+                j = signal_idx + lookahead
+                if j >= len(bars):
+                    break
+                bar = bars[j]
+                if direction == "long" and bar.low <= limit_price:
+                    fill_idx = j
+                    break
+                if direction == "short" and bar.high >= limit_price:
+                    fill_idx = j
+                    break
+            if fill_idx is None:
+                # Limit never touched — no trade.
+                continue
+            entry_idx = fill_idx
+            entry_price = limit_price
+        else:
+            entry_idx = signal_idx
+            entry_price = signal_price
+
+        # Per-trade thresholds — from FILL price, so a better fill shifts
+        # target and stop symmetrically. Standard trader behavior.
         target_dist = (
             target_atr * context.atr if target_atr is not None
             else target_pips * pip
@@ -225,15 +267,18 @@ def backtest_touches(
             target_price, stop_price, max_bars, path_ambiguity,
         )
 
-        pnl = (
+        gross_pnl = (
             exit_price - entry_price if direction == "long"
             else entry_price - exit_price
         )
+        # Round-trip spread cost applied once per completed trade.
+        pnl = gross_pnl - spread_pips * pip
 
         trades.append(Trade(
             entry_idx=entry_idx,
             entry_time=bars[entry_idx].time,
             entry_price=entry_price,
+            signal_price=signal_price,
             direction=direction,
             level=touch.level,
             target_price=target_price,
