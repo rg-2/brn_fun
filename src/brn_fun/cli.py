@@ -24,6 +24,7 @@ from .reaction import (
     favorable_percentiles,
     target_stats,
 )
+from .live.paper import PaperTrader
 from .strategy import STRATEGIES, get_strategy
 
 # Rough time-per-bar for granularity codes we might see. Used only for
@@ -1080,6 +1081,57 @@ def strategy_run_cmd(
     if export is not None:
         _export_trades(export, trades, pip=cfg.pip)
         click.echo(f"\nwrote {len(trades)} trades to {export}")
+
+
+@cli.group("live")
+@click.pass_context
+def live_group(ctx: click.Context) -> None:
+    """Live trading (paper mode only for now — no orders are placed)."""
+
+
+@live_group.command("watch")
+@click.argument("strategy_name", type=click.Choice(list(STRATEGIES)))
+@click.option("--interval", type=int, default=60, show_default=True,
+              help="Seconds between Oanda polls.")
+@click.option("--log-file", type=click.Path(dir_okay=False, path_type=Path),
+              default=Path("data/paper.log"), show_default=True)
+@click.option("--state-file", type=click.Path(dir_okay=False, path_type=Path),
+              default=Path("data/paper_state.json"), show_default=True)
+@click.pass_context
+def live_watch_cmd(
+    ctx: click.Context,
+    strategy_name: str,
+    interval: int,
+    log_file: Path,
+    state_file: Path,
+) -> None:
+    """Detect signals live and simulate limit-fill + target-or-stop in PAPER MODE.
+
+    No orders are ever placed. Reads bars from Oanda, writes bars to the
+    same local SQLite the backtester uses, logs every stage as text-line
+    events. Ctrl+C shuts down cleanly and saves state so a restart picks
+    up where it left off.
+    """
+    cfg = get_strategy(strategy_name)
+    app_cfg = ctx.obj["config"]
+    secrets = load_secrets()
+
+    trader = PaperTrader(
+        strategy=cfg,
+        secrets=secrets,
+        db_path=Path(app_cfg.db_path),
+        state_path=state_file,
+        log_path=log_file,
+        poll_seconds=interval,
+    )
+    click.echo(
+        f"Paper-mode live watcher for '{cfg.name}' ({cfg.instrument} "
+        f"{cfg.granularity}). Polling every {interval}s."
+    )
+    click.echo(f"Log:   {log_file}")
+    click.echo(f"State: {state_file}")
+    click.echo("Ctrl+C to stop. No orders will be placed.\n")
+    trader.run()
 
 
 def _iso_to_dt(s: str) -> datetime:

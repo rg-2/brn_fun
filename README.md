@@ -58,6 +58,54 @@ Every top-level command supports `--help`. Highlights:
 | `brn strategy info NAME` | Show a strategy's full parameter set. |
 | `brn strategy run NAME [--start YYYY-MM-DD] [--end ...] [--export CSV]` | Run a named strategy end-to-end with the settled parameters. |
 
+### Live (paper mode)
+
+| Command | Purpose |
+|---|---|
+| `brn live watch STRATEGY_NAME [--interval 60] [--log-file paper.log]` | Continuously poll Oanda for new bars, detect signals, and simulate limit-fill + target-or-stop **in paper mode** (no orders placed). Ctrl+C to stop cleanly. Restart picks up from persisted state. |
+
+## Live paper mode
+
+`brn live watch audusd` runs the AUD_USD strategy against a live Oanda feed
+**without placing any orders**. What it does:
+
+1. Every ``--interval`` seconds (default 60), asks Oanda for new M1 bars for
+   AUD_USD and upserts them into the same SQLite the backtester uses.
+2. Runs incremental round-number touch detection against the tail of your
+   stored bars. Cooldown state (per-level "when did we last touch this?")
+   is persisted, so restarts don't re-fire signals for levels still in
+   their 5-day cool-down.
+3. When a touch fires, waits the strategy's confirmation window
+   (15 minutes for `audusd`), then simulates the limit order the strategy
+   would place (2 pips favorable to signal close). The simulation watches
+   the following 60 minutes of bars for the limit to fill.
+4. Once "filled", tracks target and stop (60p / 30p from fill for `audusd`),
+   walking bars forward up to 24h. Same worst-case path assumption as the
+   backtester (single-bar target+stop resolves to stop).
+5. Every stage — signal detected, limit simulated, fill simulated, exit —
+   logs a one-line event with all the numbers.
+
+Sample log:
+
+```
+2026-07-09T21:23:48Z  START         strategy=audusd instrument=AUD_USD granularity=M1 poll_seconds=60
+2026-07-09T21:23:48Z  SIGNAL        level=0.69000 direction=down signal_time=2026-07-01T16:56:00Z
+2026-07-09T21:23:48Z  LIMIT-SIM     dir=long level=0.69000 signal_time=2026-07-01T17:11:00Z signal_price=0.68998 limit_price=0.68978 fill_window=60
+2026-07-09T21:23:48Z  FILL-SIM      dir=long level=0.69000 fill_time=2026-07-01T18:06:00Z entry=0.68978 target=0.69578 stop=0.68678
+2026-07-09T21:23:48Z  TIMEOUT-SIM   dir=long level=0.69000 exit_time=2026-07-02T18:22:00Z exit_price=0.69190 pnl_pips=+20.2 hold_bars=1440
+2026-07-09T21:23:48Z  poll          new_bars=1952 working_bars=8760 signals=1 pending=0 open=0 latest_bar=2026-07-09T21:22:00Z
+```
+
+State (last processed bar, per-level cooldown, pending signals awaiting the
+confirmation window, currently-open hypothetical trades) is written to
+`data/paper_state.json` after every poll. **Nothing about this mode
+touches Oanda's order endpoints** — the API calls are limited to the
+read-only candle endpoint already used by `brn download`.
+
+Live-order execution (Phase 2), containerization, and a status dashboard
+are planned but not built yet — see the `Ready for some live testing`
+section of `project_plan.md`.
+
 ## Anatomy of a strategy run
 
 When you run `brn strategy run audusd`, this is what happens:
