@@ -33,3 +33,11 @@
 2. Should we look for long term trend continuation
 3. Should stop be above/below the wick of the breaking candle?
 4. Would be interesting to apply this to different levels, specifically, previous day high/low and previous week high / low provided there is some 'space' before the touch and bounce.
+
+### Ready for some live testing
+1. Lets run this automated
+2. This should run standalone on the dev server.  Ideally in a container.
+3. We'll run it on practice for a few weeks and see how it performs
+4. Publish status info to fx.trailsendsrv.com (Container status, list of any open trades, trade history with P/L in pips, plots of 3 most recent trades)
+5. paramaters, and settings will be kept locally and easy to adjust in config files (will manage with vs code and claude)
+6. easy commands to start / stop locally (I can access via wireguard)
