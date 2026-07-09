@@ -2,6 +2,23 @@
 
 *Report generated 2026-07-09 — 10-year backtest, M1 data, spread + limit entries applied.*
 
+## Reproduce this backtest
+
+The full strategy is registered as `audusd` in
+[`src/brn_fun/strategy.py`](../../src/brn_fun/strategy.py). Every number in
+this report comes from:
+
+```bash
+uv run brn strategy run audusd
+```
+
+Prerequisite: 10 years of M1 bars downloaded into the local SQLite
+(`brn download AUD_USD --granularity M1 --from 2016-01-01`).
+
+The command's full execution flow — signal detection, limit-order simulation,
+same-bar path ambiguity handling — is walked through step-by-step in the
+["Anatomy of a strategy run" section of the top-level README](../../README.md#anatomy-of-a-strategy-run).
+
 ## Strategy definition
 
 | Component     | Setting                                                           |
