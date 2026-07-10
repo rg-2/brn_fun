@@ -43,3 +43,11 @@
 4. Publish status info to fx.trailsendsrv.com (Container status, list of any open trades, trade history with P/L in pips, plots of 3 most recent trades)
 5. paramaters, and settings will be kept locally and easy to adjust in config files (will manage with vs code and claude)
 6. easy commands to start / stop locally (I can access via wireguard)
+
+
+### Notes for dashboard/status web page
+1. Show container status
+2. Show how far current price is from nearest round-number levels
+3. Recent trade history
+4. Current Price Plot (24 h) with lines to represent nearest round numberes
+5. Recent trade plots, so we can reveiw

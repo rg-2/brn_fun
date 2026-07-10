@@ -9,11 +9,14 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.4.2",
+    "lightgbm>=4.6.0",
     "matplotlib>=3.11.0",
     "oandapyv20>=0.7.2",
+    "pandas>=3.0.3",
     "pydantic-settings>=2",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
+    "scikit-learn>=1.9.0",
     "six>=1.17.0",
 ]
 

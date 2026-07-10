@@ -1130,3 +1130,93 @@ over 10y** — within noise.
 Keep baseline `cooldown=7200 (5 days), max_bars=1440 (24h)`. The tiny
 theoretical improvement at 7200/2880 (+0.09 exp) doesn't justify
 holding trades 2× longer per position. Closes task #18.
+
+## 2026-07-09 — Supervised trade-outcome prediction (AUD_USD then pooled)
+
+Built ``src/brn_fun/ml/features.py`` (52 features per trade: Context +
+Confirmation + 30 pre-touch M1 bar summaries + 10 post-touch M1 bar
+summaries + cyclical time encoding + level/direction) and two training
+scripts under ``analysis/`` (``audusd_ml.py`` and ``portfolio_ml.py``).
+Binary target: ``pnl_pips > 0`` (spread-adjusted). Time split at
+2021-01-01, LightGBM + logistic regression trained on H1, evaluated on H2.
+
+### AUD_USD alone — nothing generalized
+
+- 328 trades split 159/169
+- Logistic regression H1 AUC 0.706, **H2 AUC 0.481** (worse than random)
+- LightGBM H1 AUC 0.891 (heavy in-sample overfit), **H2 AUC 0.509**,
+  ``best_iteration=1`` — the very first tree already increased test loss.
+- Threshold sweep produced +1.54 exp lift at P≥0.70 on 59 trades — noise.
+
+The 328-sample dataset is genuinely too small for the label noise level.
+
+### Pooled 4-pair (AUD_USD + USD_CAD + EUR_JPY + GBP_USD) — real signal
+
+- **1,989 trades total, ~6× the AUD_USD-only sample.**
+- H1 train: 991 trades. H2 test: 998 trades.
+- Pair-identity encoded as one-hot; each pair uses its own settled
+  target/stop/max_bars/entry_offset/spread config.
+
+- Logistic regression H1 AUC 0.631, **H2 AUC 0.528** — modest but non-random.
+- **LightGBM H1 AUC 0.791, H2 AUC 0.553, best_iteration=19** — the model
+  actually learned.
+
+### Threshold sweep (LGB on H2)
+
+| P(win) threshold | Trades kept | H2 exp | H2 total | Δ vs baseline |
+|-----------------:|------------:|-------:|---------:|--------------:|
+| Unfiltered       |  998 (100%) | +1.02 | +1,022  |             — |
+| ≥ 0.40           |  949 (95%)  | +1.28 | +1,219  |         +0.26 |
+| **≥ 0.45**       |  **772 (77%)** | **+1.72** | **+1,326** | **+0.69** |
+| ≥ 0.50           |  310 (31%)  | +1.82 | +563    |         +0.79 |
+| ≥ 0.55           |  198 (20%)  | +1.11 | +220    |         +0.09 |
+
+**Sweet spot at P≥0.45**: 30% more total P&L, 68% higher per-trade
+edge, keeping 77% of trades.
+
+### Where the win comes from — per-pair at P≥0.45
+
+| Pair    | Baseline exp | Filtered exp | Kept       |
+|---------|-------------:|-------------:|-----------:|
+| AUD_USD |         +9.1 |    **+12.5** | 131 / 169  |
+| USD_CAD |         −1.0 |         +0.3 | 172 / 191  |
+| EUR_JPY |         −0.7 |         −1.3 | 260 / 358  |
+| GBP_USD |         −0.4 |         −0.2 | 209 / 269  |
+
+Most of the lift is on AUD_USD (already the profitable pair) — the
+filter finds its higher-probability subset. USD_CAD gets rescued from a
+small loss to breakeven. EUR_JPY and GBP_USD remain unprofitable —
+they're beyond what this filter can save.
+
+### Feature importance — post-touch dominates
+
+LightGBM top splits: ``post_adverse_pips`` (34), ``ctx_dist_from_sma_pips``
+(27), ``post_max_up_move_pips`` (25), ``post_range_pips`` (23),
+``post_volume_mean`` (23).
+
+Logistic regression top coefficients:
+- ``post_realized_vol_pips`` = −0.49 — high post-vol → losers.
+- ``post_first_half_return_pips`` = −0.34 — early drift = losers.
+- ``ctx_approach_change_pips`` = −0.19 — echoes the "sprint approaches
+  hurt" finding from way back.
+
+**The 10 M1 bars after the touch dominate feature importance.**
+
+### Honest caveats
+
+1. **Threshold might be data-mined.** The sweep found 0.45-0.50 works but
+   0.55+ degrades quickly — that's the shape of a specific optimum. A
+   robust production version would fix threshold at 0.45 and never sweep OOS.
+2. **Most lift is on AUD_USD** — the pair that was already our real edge.
+   Filter concentrates risk on one pair rather than diversifying it.
+3. **H2 is the favorable regime.** The 2016-2020 period was harder; we
+   can't check the other direction without swapping train/test roles.
+4. **AUC 0.553 is modest.** Real OOS signal but not overwhelming.
+
+### Net take
+
+Pooling was the fix — 328 samples wasn't enough, 2,000 was. The model
+learns real patterns dominated by the first 10 minutes of post-touch
+price action, which validates the user's intuition to include those
+bars. A P≥0.45 filter is a plausible strategy-config addition; needs
+walk-forward validation before it's trusted enough for the live trader.
