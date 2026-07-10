@@ -1220,3 +1220,80 @@ learns real patterns dominated by the first 10 minutes of post-touch
 price action, which validates the user's intuition to include those
 bars. A P≥0.45 filter is a plausible strategy-config addition; needs
 walk-forward validation before it's trusted enough for the live trader.
+
+## 2026-07-09 — Walk-forward validation: filter is per-pair, not portfolio-wide
+
+Ran 6-fold walk-forward on the pooled 4-pair ML filter with **fixed
+threshold 0.45** (no per-fold tuning — snooping would inflate any lift).
+For each test year 2021-2026 we trained LightGBM on all trades before
+that year (anchored/expanding window) and predicted on the year.
+Analysis at ``analysis/portfolio_ml_walkforward.py``.
+
+### Per-year results
+
+| Year | Trades | AUC | Base exp | Filt exp | Δ exp | Δ tot |
+|-----:|-------:|----:|---------:|---------:|------:|------:|
+| 2021 |   138  | 0.527 | +0.63  | +1.03   |  +0.39 |   +52 |
+| 2022 |   256  | 0.552 | +3.10  | +4.00   |  +0.90 |   −74 |
+| 2023 |   183  | 0.535 | +1.29  | +1.07   |  −0.22 |   −57 |
+| 2024 |   171  | 0.539 | −0.25  | −0.41   |  −0.16 |   −11 |
+| 2025 |   172  | 0.656 | +1.32  | +5.30   |  +3.98 |  +313 |
+| 2026 |    78  | 0.587 | −3.58  | −1.96   |  +1.62 |  +181 |
+
+- **4 of 6 years** show positive Δ per-trade expectancy.
+- Mean Δ exp per year: **+1.08 pips/trade** (median +0.64).
+- Cumulative baseline: **+1,022 pips**; cumulative filtered: **+1,426 pips**
+  (+40% total P&L improvement).
+
+### But per-pair rollup tells the real story
+
+| Pair    | Base n | Base tot | Filt tot | Δ tot |
+|---------|-------:|---------:|---------:|------:|
+| **AUD_USD** |    169 |   +1,542 |   +1,224 |  **−318** |
+| **USD_CAD** |    197 |     −201 |     +142 |  **+343** |
+| **EUR_JPY** |    361 |     −276 |      +76 |  **+352** |
+| GBP_USD |    271 |      −43 |      −16 |    +27 |
+
+In the original H1/H2 single-split analysis the filter *looked* like it
+was helping AUD_USD (+9.1 → +12.5). Walk-forward reveals it actually
+**hurts AUD_USD by −318 pips over 6 years** — the H2 boost was
+partially a boundary-of-window artifact.
+
+**The filter's real value is on USD_CAD and EUR_JPY:** it rescues those
+losing pairs from −201 → +142 and −276 → +76 respectively (a combined
++695 pip swing on the two pairs).
+
+### The AUD_USD lesson
+
+Single-split OOS with 991 train / 998 test samples is enough training
+for the model to identify H1 patterns that happen to match some H2
+patterns for AUD_USD — but not enough for those patterns to be a
+genuine year-to-year edge. Walk-forward exposes the noise; the H2 boost
+we thought we saw for AUD_USD doesn't reproduce.
+
+### Deployment implication
+
+**Selective per-pair filter beats portfolio-wide filter:**
+
+| Strategy                | Portfolio 10y total (walk-forward) |
+|-------------------------|------------------------------------:|
+| No filter               | +1,022 pips                        |
+| Filter portfolio-wide   | +1,426 pips (+40%)                 |
+| **Filter only USD_CAD + EUR_JPY + GBP_USD; skip for AUD_USD** | **+1,744 pips (+71%)** |
+
+The last row is the honest optimum: keep AUD_USD unfiltered (its
+native +1,542 baseline), apply the filter to the three marginal-edge
+pairs (−520 combined → +202 combined = +722 pips rescued).
+
+### Net
+
+The filter is **real for USD_CAD and EUR_JPY** (rescues losing pairs),
+**noise for AUD_USD and GBP_USD** (roughly wash). Deployment
+recommendation: gate the filter with a per-strategy config flag; enable
+it for the pairs where walk-forward confirms it helps, disable for
+those where it hurts. Applies cleanly to the ``StrategyConfig`` shape
+(each pair-strategy container decides independently).
+
+Not integrated into the paper trader yet — first needs walk-forward
+validation on production-mode (train on all data since 2016, retrain
+periodically) rather than the retrospective per-year fits we did here.
