@@ -1,17 +1,28 @@
-# Paper-mode live trader — Phase 1, no orders placed.
+# Paper-mode live traders — Phase 1, no orders placed.
+#
+# Architecture: one service (and container) per (pair, strategy). Each has
+# its own state file and log file; the SQLite database is shared because
+# bar data is inherently pair-partitioned by the `instrument` column.
 #
 # Usage on the dev server:
-#   docker compose up -d              # start in background
-#   docker compose logs -f paper      # stream events
-#   docker compose stop paper         # graceful shutdown (SIGTERM)
-#   docker compose down               # stop + remove container
+#   docker compose up -d                # start every registered strategy
+#   docker compose up -d paper-audusd   # start just one
+#   docker compose logs -f paper-audusd # stream one strategy's events
+#   docker compose stop paper-audusd    # graceful shutdown (SIGTERM)
+#   docker compose ps                   # all services + their status
 #
-# On first startup the container's cold-start fetches the last ~6 days of
-# AUD_USD M1 bars from Oanda into data/brn_fun.sqlite. Subsequent polls
-# fetch only the delta since the newest stored bar.
+# Adding a new (pair, strategy) means:
+#   1. Register the strategy in src/brn_fun/strategy.py
+#   2. Add a new service block below following the paper-audusd pattern
+#      with matching --log-file / --state-file paths
+#   3. `docker compose up -d`
+#
+# On first startup each service's cold-start fetches the last ~6 days of
+# that pair's M1 bars from Oanda into data/brn_fun.sqlite; subsequent
+# polls fetch only the delta since the newest stored bar.
 
 services:
-  paper:
+  paper-audusd:
     build:
       context: .
       # Match the host UID so the mounted data dir isn't owned by root.
@@ -19,17 +30,25 @@ services:
         UID: ${UID:-1000}
         GID: ${GID:-1000}
     image: brn_fun/paper:latest
-    container_name: brn_paper
+    container_name: brn_paper_audusd
 
-    # Persist everything the trader writes on the host side.
-    #   - SQLite DB (candles + growing history)
-    #   - paper.log (append-only event log)
-    #   - paper_state.json (last-processed bar, per-level cooldown, etc.)
+    # Persist state + log per-strategy; share the SQLite DB.
     volumes:
       - ./data:/app/data
       # Read-only bind mounts — credentials + config live outside the image.
       - ./.env:/app/.env:ro
       - ./config.yaml:/app/config.yaml:ro
+
+    # Explicit per-strategy paths so future strategies don't collide.
+    command:
+      - brn
+      - live
+      - watch
+      - audusd
+      - --log-file
+      - /app/data/paper_audusd.log
+      - --state-file
+      - /app/data/paper_audusd_state.json
 
     # Auto-restart on crash but stop when the operator explicitly stops it.
     restart: unless-stopped
@@ -38,3 +57,19 @@ services:
     # handler flushes state and closes the log within a few seconds.
     stop_signal: SIGTERM
     stop_grace_period: 15s
+
+  # -----------------------------------------------------------------
+  # Add more strategies here as new services following the same pattern.
+  # Example (uncomment + register in strategy.py when ready):
+  #
+  # paper-usdcad:
+  #   build: { context: ., args: { UID: ${UID:-1000}, GID: ${GID:-1000} } }
+  #   image: brn_fun/paper:latest
+  #   container_name: brn_paper_usdcad
+  #   volumes: [./data:/app/data, ./.env:/app/.env:ro, ./config.yaml:/app/config.yaml:ro]
+  #   command: [brn, live, watch, usdcad,
+  #             --log-file, /app/data/paper_usdcad.log,
+  #             --state-file, /app/data/paper_usdcad_state.json]
+  #   restart: unless-stopped
+  #   stop_signal: SIGTERM
+  #   stop_grace_period: 15s

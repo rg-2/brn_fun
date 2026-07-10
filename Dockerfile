@@ -49,6 +49,9 @@ ENV PATH="/app/.venv/bin:${PATH}"
 # Python & uv should log unbuffered so `docker compose logs -f` streams events.
 ENV PYTHONUNBUFFERED=1
 
-# `brn live watch audusd` runs the paper trader. Overridable in compose.
-CMD ["brn", "live", "watch", "audusd", "--log-file", "/app/data/paper.log", \
-     "--state-file", "/app/data/paper_state.json"]
+# Default: run the AUD_USD paper trader with generic paths. Every compose
+# service overrides this CMD with strategy-specific --log-file and
+# --state-file so the shared image works for any registered strategy.
+CMD ["brn", "live", "watch", "audusd", \
+     "--log-file", "/app/data/paper_audusd.log", \
+     "--state-file", "/app/data/paper_audusd_state.json"]

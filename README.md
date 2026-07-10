@@ -98,9 +98,9 @@ Sample log:
 
 State (last processed bar, per-level cooldown, pending signals awaiting the
 confirmation window, currently-open hypothetical trades) is written to
-`data/paper_state.json` after every poll. **Nothing about this mode
-touches Oanda's order endpoints** — the API calls are limited to the
-read-only candle endpoint already used by `brn download`.
+`data/paper_<strategy>_state.json` after every poll. **Nothing about this
+mode touches Oanda's order endpoints** — the API calls are limited to
+the read-only candle endpoint already used by `brn download`.
 
 Live-order execution (Phase 2) and a status dashboard are planned but not
 built yet — see the `Ready for some live testing` section of `project_plan.md`.
@@ -108,42 +108,52 @@ built yet — see the `Ready for some live testing` section of `project_plan.md`
 ### Deploying with Docker
 
 For unattended operation on a server, the paper trader ships with a
-Dockerfile and docker-compose config:
+Dockerfile and docker-compose config. **One container per (pair,
+strategy)**: each combination gets its own service, container, log file,
+and state file — nothing shared except the SQLite bar database and the
+image itself.
 
 ```bash
-# One-time: sanity-check the image builds locally
+# One-time: build the shared image
 docker compose build
 
-# Start in the background (uses ./data as the persistence volume)
+# Start every registered strategy in the background
 docker compose up -d
 
-# Stream events as they happen
-docker compose logs -f paper
+# ... or just one
+docker compose up -d paper-audusd
 
-# Stop cleanly (delivers SIGTERM; the trader flushes state before exiting)
-docker compose stop paper
+# Stream events for one strategy
+docker compose logs -f paper-audusd
 
-# Or tear down container + network entirely
+# Stop cleanly (SIGTERM → trader flushes state → exit)
+docker compose stop paper-audusd
+
+# Full teardown of every strategy container
 docker compose down
 ```
 
 The compose file:
 
-- **Mounts `./data`** into `/app/data` so the SQLite DB, `paper.log`, and
-  `paper_state.json` live on the host and survive image rebuilds. Point
-  it at your existing `data/` directory to reuse the historical M1 bars
-  you've already downloaded; on a fresh host, the trader cold-starts by
-  fetching the last ~6 days of AUD_USD M1 from Oanda automatically.
+- **One service per `(pair, strategy)`** named `paper-<slug>` (e.g.
+  `paper-audusd`). Adding a new strategy means (1) registering it in
+  `src/brn_fun/strategy.py` and (2) copying the `paper-audusd` service
+  block with the new slug and per-strategy log/state paths.
+- **Mounts `./data`** into `/app/data`. Log files (`paper_<slug>.log`)
+  and state files (`paper_<slug>_state.json`) are per-strategy; the
+  SQLite database (`brn_fun.sqlite`) is shared because bar data is
+  partitioned by the `instrument` column and there's no benefit to
+  duplicating it.
 - **Bind-mounts `./.env`** read-only so Oanda credentials never end up
   baked into the image or in the git tree.
 - **Uses `restart: unless-stopped`** so a crash comes back up automatically,
   but explicit `docker compose stop` stays stopped.
 - **Runs as a non-root user** matching the host UID (override with
-  `UID=… GID=… docker compose up -d` if your host uid isn't 1000) so the
+  `UID=… GID=… docker compose up -d` if your host UID isn't 1000) so the
   files it writes to `./data` aren't root-owned.
 
-Because the container only talks to the read-only Oanda candle endpoint,
-this is safe to run even against a live-account API key.
+Because every container only talks to the read-only Oanda candle
+endpoint, this is safe to run even against a live-account API key.
 
 ## Anatomy of a strategy run
 
